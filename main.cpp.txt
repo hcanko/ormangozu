@@ -1,0 +1,197 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <Wire.h>
+#include <Adafruit_MLX90640.h>
+#include <Adafruit_BME680.h>
+#include <HTTPClient.h>
+#include <TinyGPSPlus.h> // GPS NMEA Ayrıştırıcı
+
+const char* ssid = "SUPERONLINE_Wi-Fi_5132"; 
+const char* password = "k5ddzkDGZQED";
+
+// DİKKAT: Bilgisayarınızın IP adresinin değişmediğinden emin olun.
+const char* BACKEND_URL = "http://192.168.1.16:8000/api/sensor-data"; 
+
+AsyncWebServer server(80);
+Adafruit_MLX90640 mlx;
+Adafruit_BME680 bme; 
+
+// Heltec V4 Özel GNSS Soketi Pinleri
+TinyGPSPlus gps;
+HardwareSerial GPS_Serial(1); // ESP32'nin 1 numaralı donanımsal seri portu
+#define GPS_RX_PIN 38   // Soketin RX Hattı
+#define GPS_TX_PIN 39   // Soketin TX Hattı
+#define GPS_CTRL_PIN 34 // L76K modülünün güç şalteri (GNSS_EN)
+
+// Cihaz uydulara kilitlenene kadar kullanılacak varsayılan koordinatlar
+float currentLat = 38.4237; 
+float currentLng = 27.1428;
+
+int sleep_interval = 2000; 
+unsigned long last_post_time = 0; 
+
+#define BATTERY_PIN 1
+#define ADC_CTRL_PIN 37 
+
+// 🔥 YENİ: Otomatik İsimlendirme İçin Global Değişken
+String myTowerID = "";
+
+int getBatteryPercentage() {
+  pinMode(ADC_CTRL_PIN, OUTPUT);
+  digitalWrite(ADC_CTRL_PIN, HIGH); // MOSFET'i aç, ölçüme başla
+  delay(50); 
+  
+  int milliVolts = analogReadMilliVolts(BATTERY_PIN);
+  digitalWrite(ADC_CTRL_PIN, HIGH); // Ölçüm bitti, pil tasarrufu için kapat
+  
+  float voltage = (milliVolts / 1000.0) * 4.9; 
+  int percentage = map(voltage * 100, 330, 420, 0, 100);
+  int final_percentage = constrain(percentage, 0, 100);
+
+  Serial.print("🔋 PİL -> Milivolt: "); Serial.print(milliVolts);
+  Serial.print(" | Voltaj: "); Serial.print(voltage);
+  Serial.print("V | Yüzde: %"); Serial.println(final_percentage);
+
+  return final_percentage;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000); 
+  
+  Serial.println("\n=== ORMAN GÖZÜ (OTONOM KONUM MODU) BAŞLIYOR ===");
+
+  // Önce L76K GPS Modülüne Elektrik Ver
+  pinMode(GPS_CTRL_PIN, OUTPUT);
+  digitalWrite(GPS_CTRL_PIN, LOW); 
+  delay(500); // Modülün kendine gelmesini bekle
+
+  GPS_Serial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  Serial.println("🛰️ GPS Modülü UART üzerinden dinleniyor (RX:38, TX:39, EN:34)...");
+
+  WiFi.begin(ssid, password);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm); 
+
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\n✅ WI-FI TAMAM");
+
+  // 🔥 YENİ: Wi-Fi bağlandıktan sonra cihazın eşsiz MAC adresini al
+  String mac = WiFi.macAddress(); 
+  mac.replace(":", ""); // Aradaki iki noktaları temizle (Örn: 1A2B3C4D5E6F)
+  
+  // Son 4 haneyi al ve dinamik TOWER ismini oluştur
+  myTowerID = "TOWER-" + mac.substring(mac.length() - 4);
+  
+  Serial.print("🤖 Otomatik Cihaz Kimliği Atandı: ");
+  Serial.println(myTowerID);
+  Serial.print("🌐 Cihaz IP Adresi: ");
+  Serial.println(WiFi.localIP().toString());
+
+  Wire.begin(41, 42); 
+  Wire.setClock(400000); 
+  
+  if (mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire)) {
+    mlx.setMode(MLX90640_CHESS);
+    mlx.setRefreshRate(MLX90640_4_HZ); 
+    Serial.println("Termal Kamera: ✅ BAĞLANDI");
+  } else {
+    Serial.println("Termal Kamera: ❌ BULUNAMADI");
+  }
+
+  if (bme.begin(0x76, &Wire)) {
+    bme.setGasHeater(320, 150);
+    Serial.println("Gaz Sensörü: ✅ BAĞLANDI");
+  } else {
+    Serial.println("Gaz Sensörü: ❌ BULUNAMADI");
+  }
+
+  server.on("/sleep", HTTP_POST, [](AsyncWebServerRequest *request){
+    if(request->hasParam("value")){
+      sleep_interval = request->getParam("value")->value().toInt();
+      request->send(200, "text/plain", "Hiz guncellendi");
+    }
+  });
+
+  server.begin();
+}
+
+void loop() {
+  while (GPS_Serial.available() > 0) {
+    if (gps.encode(GPS_Serial.read())) {
+      if (gps.location.isValid()) {
+        currentLat = gps.location.lat();
+        currentLng = gps.location.lng();
+      }
+    }
+  }
+
+  if (millis() - last_post_time >= sleep_interval) {
+    last_post_time = millis(); // Sayacı sıfırla
+
+    if (WiFi.status() == WL_CONNECTED) {
+      float frame[768];
+      float maxT = 0;
+      if (mlx.getFrame(frame) == 0) {
+          for (int i = 0; i < 768; i++) {
+            if(frame[i] > maxT) maxT = frame[i];
+          }
+      }
+
+      float gasRes = 0.0;
+      if (bme.performReading()) {
+        gasRes = bme.gas_resistance;
+      }
+
+      int battery = getBatteryPercentage();
+
+      Serial.print("🛰️ GPS -> Uydular: "); Serial.print(gps.satellites.value());
+      if(gps.location.isValid()) {
+          Serial.print(" | KİLİTLENDİ ("); Serial.print(currentLat, 6); Serial.print(", "); Serial.print(currentLng, 6); Serial.println(")");
+      } else {
+          Serial.println(" | Aranıyor... (Açık gökyüzü gerekli)");
+      }
+
+      String json;
+      json.reserve(4500); 
+      
+      json += "{";
+      // 🔥 YENİ: Dinamik ID ve Canlı IP Adresi pakete ekleniyor
+      json += "\"device_id\":\"" + myTowerID + "\",";
+      json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+      json += "\"max_temp\":" + String(maxT) + ",";
+      json += "\"gas_raw_resistance\":" + String(gasRes) + ",";
+      json += "\"battery_level\":" + String(battery) + ",";
+      
+      json += "\"lat\":" + String(currentLat, 6) + ",";
+      json += "\"lng\":" + String(currentLng, 6) + ",";
+      
+      json += "\"pixels\":[";
+      
+      for(int i=0; i < 768; i++){
+          int pVal = constrain((int)frame[i], 0, 255); 
+          json += String(pVal);
+          if(i < 767) json += ",";
+      }
+      json += "]}";
+
+      HTTPClient http;
+      http.begin(BACKEND_URL);
+      http.addHeader("Content-Type", "application/json");
+
+      int httpResponseCode = http.POST(json);
+
+      if (httpResponseCode == 200) {
+        // 🔥 YENİ: Zeka Skorunu içeren gövdeyi (body) okuyup ekrana basıyoruz
+        String response = http.getString();
+        Serial.println("✅ Veri İletildi!");
+        Serial.print("🧠 ZEKA SKORU CEVABI: ");
+        Serial.println(response);
+      } else {
+        Serial.print("❌ FastAPI Bağlantı Hatası! Kod: "); Serial.println(httpResponseCode);
+      }
+      http.end();
+    }
+  }
+}

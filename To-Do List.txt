@@ -1,0 +1,13 @@
+Dinamik Gaz Referansı (EMA & Türev): BME680'in ısınma süresine ve gece nemine aldanmaması için asimetrik bir hareketli ortalama ve düşüş ivmesi filtresi yazdık. (Backend'de az önce hallettik).
+
+Kritik An Fotoğrafı (Snapshot): Sistem "KRİTİK" durumuna geçtiğinde diski şişirmeden (60 saniye aralıklarla) termal kameranın o anki görüntüsünü .png olarak kaydedecek. (Backend'de az önce hallettik).
+
+Çift Çekirdek (Dual-Core) Mimarisi: ESP32-S3'ün tam gücünü kullanıp görevleri böleceğiz. Core 0 sadece sensörleri okuyacak, Core 1 ise 7/24 LoRa dinleyerek I2C kilitlenmelerini ve mesaj kaçırmaları önleyecek.
+
+LoRa Trafik Kuralları (LBT): Kulelerin aynı anda alarma geçip havada paketleri çarpıştırmaması için "Konuşmadan Önce Dinle" (Listen Before Talk) ve rastgele bekleme (backoff) kodları eklenecek.
+
+Silecek (Sweep) Tarama: Mekanik servo eklendiğinde, matkap gibi 360 derece dönüp kabloları koparmasın diye radar gibi sağa-sola (0-180 derece) tarama mantığı yazılacak.
+
+Uydu (GNSS) ve Pusula: L76K GPS modülünün üstü boş bırakılıp doğrudan gökyüzüne bakması sağlanacak ve kulelerin baktığı açıyı bilmesi için I2C dijital pusula entegre edilecek.
+
+Derin Uyku (Deep Sleep): Pili korumak için sistemin ölçümler arası uykuda kalmasını sağlayan otonom enerji yönetimi kodlanacak.
