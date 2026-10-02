@@ -4,53 +4,111 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/event_groups.h>
+#include "config.h"
 
-// LoRa ve backend için ortak alarm seviyesi
-enum AlertLevel : uint8_t {
-    ALERT_NORMAL = 0,
-    ALERT_WARNING = 1,
-    ALERT_CRITICAL = 2
+// Yangın seviyesi ile cihaz sağlığı bilinçli olarak ayrıdır.
+enum FireLevel : uint8_t {
+    FIRE_NORMAL = 0,
+    FIRE_WATCH = 1,
+    FIRE_WARNING = 2,
+    FIRE_CRITICAL = 3,
+    FIRE_CONFIRMED = 4
 };
 
-// Core 0'ın okuyup Core 1'e göndereceği ana veri paketi
+enum HealthLevel : uint8_t {
+    HEALTH_OK = 0,
+    HEALTH_DEGRADED = 1,
+    HEALTH_FAULT = 2
+};
+
 struct SensorDataPacket {
-    // Ana sensör verileri
     float max_temp;
     float gas_res;
     float lat;
     float lng;
 
-    // Enerji telemetrisi
     int battery_pct;
     float battery_mv;
+    float solar_voltage_mv;
+    float solar_current_ma;
 
-    // Termal kamera frame'i
     float pixels[768];
 
-    // Alarm / karar telemetrisi
-    uint8_t alert_level;
+    // Ham/ara termal metrikler
+    float ambient_temp;
+    float hotspot_threshold;
+    float top5_temp;
+    uint16_t hot_pixels_45;
+    uint16_t hot_pixels_50;
+    uint16_t hot_pixels_60;
+    uint16_t largest_hotspot_cluster;
+    int8_t hotspot_x;
+    int8_t hotspot_y;
+    uint8_t persistence_count;
 
-    // Sensör sağlık bilgileri
+    // Gaz ve füzyon metrikleri
+    float local_delta_t;
+    float gas_ema;
+    float gas_drop_pct;
+    float score_temp;
+    float score_cluster;
+    float score_persistence;
+    float score_delta_t;
+    float score_gas;
+    float local_fire_score;
+    uint8_t fire_level;
+    uint8_t health_level;
+
     bool mlx_ok;
     bool gas_ok;
-    bool gps_fix;
+    bool network_confirmed;
 
-    // Mekanik / sistem telemetrisi
-    int servo_angle;
     uint32_t uptime_ms;
-    uint32_t read_counter;
+    uint32_t sequence;
     uint32_t error_counter;
+    uint32_t free_heap;
 };
 
-// Wi-Fi / backend hattı için tam veri kuyruğu
-extern QueueHandle_t networkDataQueue;
+struct LoraTxMessage {
+    char payload[240];
+    char type[12];
+    char destination[24];
+    uint32_t sequence;
+    bool require_ack;
+};
 
-// LoRa için sadece UYARI / KRİTİK alarm kuyruğu
-extern QueueHandle_t loraAlertQueue;
+enum PeerEventType : uint8_t {
+    PEER_EVENT_ALERT = 1,
+    PEER_EVENT_REPORT = 2,
+    PEER_EVENT_CONFIRMED = 3
+};
 
-// Global ayarlar
-extern int sleep_interval;
+struct PeerEvent {
+    uint8_t type;
+    char source[24];
+    uint32_t sequence;
+    uint8_t fire_level;
+    uint8_t health_level;
+    float fire_score;
+    float max_temp;
+    uint16_t largest_cluster;
+    uint8_t persistence_count;
+    float gas_drop_pct;
+    float rssi;
+    float snr;
+};
+
+extern QueueHandle_t loraTxQueue;
+extern QueueHandle_t peerEventQueue;
+extern EventGroupHandle_t systemEvents;
+
 extern String myTowerID;
-extern String localIP;
+extern String myBootID;
+
+constexpr EventBits_t EVENT_SENSOR_BUSY = BIT0;
+constexpr EventBits_t EVENT_LORA_BUSY = BIT1;
+constexpr EventBits_t EVENT_NETWORK_BUSY = BIT2;
+constexpr EventBits_t EVENT_MAINTENANCE_ACTIVE = BIT3;
 
 #endif

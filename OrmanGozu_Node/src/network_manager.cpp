@@ -1,200 +1,124 @@
 #include "network_manager.h"
 #include "globals.h"
+#include "storage_manager.h"
 
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <HTTPClient.h>
 #include <ArduinoOTA.h>
+#include <LittleFS.h>
 
-// Güvenlik için gerçek Wi-Fi şifresini koda açık yazmamak daha doğru.
-// Testte kendi değerlerinle değiştir.
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-
-// Backend IP adresini kendi FastAPI sunucuna göre güncelle.
-const char* BACKEND_URL = "http://192.168.1.16:8000/api/sensor-data";
-
+namespace {
 AsyncWebServer server(80);
+TaskHandle_t networkTaskHandle = nullptr;
+bool routesConfigured = false;
+bool serverStarted = false;
 
-static bool routesConfigured = false;
-static bool otaStarted = false;
-static unsigned long lastReconnectAttempt = 0;
+void configureRoutes() {
+    if (routesConfigured) return;
+
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html",
+            "<h2>Orman Gozu Bakim</h2>"
+            "<p><a href='/status'>Durum</a></p>"
+            "<p><a href='/logs/telemetry'>Telemetri CSV</a></p>"
+            "<p><a href='/logs/lora'>LoRa CSV</a></p>"
+            "<p><a href='/logs/fusion'>Fuzyon CSV</a></p>"
+            "<p><a href='/logs/frames0'>Termal Frames 0</a></p>"
+            "<p><a href='/logs/frames1'>Termal Frames 1</a></p>"
+            "<p><a href='/logs/frames2'>Termal Frames 2</a></p>");
+    });
+    server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "application/json", StorageManager::statusJson());
+    });
+    server.on("/logs/telemetry", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(LittleFS, StorageManager::telemetryPath(), "text/csv", true);
+    });
+    server.on("/logs/lora", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(LittleFS, StorageManager::loraLogPath(), "text/csv", true);
+    });
+    server.on("/logs/fusion", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(LittleFS, StorageManager::fusionLogPath(), "text/csv", true);
+    });
+    server.on("/logs/frames0", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(LittleFS, StorageManager::framePath(0), "application/octet-stream", true);
+    });
+    server.on("/logs/frames1", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(LittleFS, StorageManager::framePath(1), "application/octet-stream", true);
+    });
+    server.on("/logs/frames2", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(LittleFS, StorageManager::framePath(2), "application/octet-stream", true);
+    });
+    server.on("/logs/erase", HTTP_POST, [](AsyncWebServerRequest *request) {
+        StorageManager::eraseAllLogs();
+        request->send(200, "application/json", "{\"status\":\"erased\"}");
+    });
+    routesConfigured = true;
+}
+
+bool connectMaintenanceWifi() {
+    WiFi.mode(WIFI_STA);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    WiFi.begin(MAINTENANCE_WIFI_SSID, MAINTENANCE_WIFI_PASSWORD);
+    const uint32_t deadline = millis() + MAINTENANCE_CONNECT_TIMEOUT_MS;
+    while (WiFi.status() != WL_CONNECTED && static_cast<int32_t>(deadline - millis()) > 0) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    return WiFi.status() == WL_CONNECTED;
+}
+} // namespace
 
 namespace NetworkManager {
 
-    void configureRoutesOnce() {
-        if (routesConfigured) return;
+void init() {
+    WiFi.mode(WIFI_OFF);
+    configureRoutes();
+    Serial.println("📴 Wi-Fi normal operasyonda kapalı; yalnız bakım ağı görülürse açılacak.");
+}
 
-        server.on("/sleep", HTTP_POST, [](AsyncWebServerRequest *request) {
-            if (request->hasParam("value")) {
-                sleep_interval = request->getParam("value")->value().toInt();
-                request->send(200, "text/plain", "Hiz guncellendi");
-            } else {
-                request->send(400, "text/plain", "value parametresi eksik");
-            }
-        });
+void requestMaintenanceScan() {
+    if (networkTaskHandle != nullptr) xTaskNotifyGive(networkTaskHandle);
+}
 
-        server.on("/health", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(200, "application/json", "{\"status\":\"ok\"}");
-        });
+void taskLoop(void *pvParameters) {
+    networkTaskHandle = xTaskGetCurrentTaskHandle();
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+#if ENABLE_MAINTENANCE_WIFI
+        xEventGroupSetBits(systemEvents, EVENT_NETWORK_BUSY);
+        Serial.println("🔎 ORMAN_BAKIM ağı kontrol ediliyor...");
+        if (!connectMaintenanceWifi()) {
+            Serial.println("Bakım ağı yok; Wi-Fi kapatılıyor.");
+            WiFi.disconnect(true, true);
+            WiFi.mode(WIFI_OFF);
+            xEventGroupClearBits(systemEvents, EVENT_NETWORK_BUSY);
+            continue;
+        }
 
-        server.begin();
-        routesConfigured = true;
-        Serial.println("🌐 Web server aktif.");
-    }
-
-    void startOTAOnce() {
-        if (otaStarted || WiFi.status() != WL_CONNECTED) return;
+        xEventGroupSetBits(systemEvents, EVENT_MAINTENANCE_ACTIVE);
+        if (!serverStarted) {
+            server.begin();
+            serverStarted = true;
+        }
 
         ArduinoOTA.setHostname(myTowerID.c_str());
-
-        ArduinoOTA.onStart([]() {
-            String type = (ArduinoOTA.getCommand() == U_FLASH) ? "Sketch" : "Filesystem";
-            Serial.println("OTA Güncellemesi Başladı: " + type);
-        });
-
-        ArduinoOTA.onEnd([]() {
-            Serial.println("\n✅ OTA Güncellemesi Başarıyla Tamamlandı!");
-        });
-
-        ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-            Serial.printf("OTA İlerlemesi: %u%%\r", (progress / (total / 100)));
-        });
-
-        ArduinoOTA.onError([](ota_error_t error) {
-            Serial.printf("OTA Hatası [%u]\n", error);
-        });
-
         ArduinoOTA.begin();
-        otaStarted = true;
+        Serial.printf("🛠 Bakım aktif: http://%s/ | %lu saniye\n",
+                      WiFi.localIP().toString().c_str(),
+                      static_cast<unsigned long>(MAINTENANCE_WINDOW_MS / 1000));
 
-        Serial.println("☁️ OTA sistemi aktif.");
-    }
-
-    void init() {
-        Serial.println("[CORE 1] Ağ başlatılıyor...");
-
-        WiFi.mode(WIFI_STA);
-        WiFi.setTxPower(WIFI_POWER_8_5dBm);
-        WiFi.begin(ssid, password);
-
-        // Cihaz ID'sini Wi-Fi bağlantısı olmasa bile MAC üzerinden üret.
-        String mac = WiFi.macAddress();
-        mac.replace(":", "");
-        myTowerID = "TOWER-" + mac.substring(mac.length() - 4);
-
-        Serial.print("🤖 Cihaz Kimliği: ");
-        Serial.println(myTowerID);
-
-        // Wi-Fi için sonsuza kadar bekleme. LoRa ve sensörler Wi-Fi yokken de çalışabilsin.
-        unsigned long startAttempt = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
-            delay(500);
-            Serial.print(".");
+        const uint32_t deadline = millis() + MAINTENANCE_WINDOW_MS;
+        while (WiFi.status() == WL_CONNECTED && static_cast<int32_t>(deadline - millis()) > 0) {
+            ArduinoOTA.handle();
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
 
-        if (WiFi.status() == WL_CONNECTED) {
-            localIP = WiFi.localIP().toString();
-            Serial.println("\n✅ WI-FI BAĞLANDI");
-            Serial.print("🌐 IP Adresi: ");
-            Serial.println(localIP);
-        } else {
-            localIP = "0.0.0.0";
-            Serial.println("\n⚠️ Wi-Fi bağlantısı kurulamadı. Sistem LoRa/sensör modunda devam ediyor.");
-        }
-
-        configureRoutesOnce();
-        startOTAOnce();
-    }
-
-    void taskLoop(void *pvParameters) {
-        SensorDataPacket incomingData;
-
-        while (true) {
-            // Wi-Fi koparsa periyodik reconnect dene
-            if (WiFi.status() != WL_CONNECTED) {
-                if (millis() - lastReconnectAttempt > 10000) {
-                    lastReconnectAttempt = millis();
-                    Serial.println("🔄 Wi-Fi yeniden bağlanmayı deniyor...");
-                    WiFi.reconnect();
-                }
-            } else {
-                localIP = WiFi.localIP().toString();
-                startOTAOnce();
-
-                if (otaStarted) {
-                    ArduinoOTA.handle();
-                }
-            }
-
-            if (xQueueReceive(networkDataQueue, &incomingData, pdMS_TO_TICKS(50)) == pdPASS) {
-                if (WiFi.status() == WL_CONNECTED) {
-                    Serial.println("[CORE 1] Kuyruktan veri alındı, JSON Wi-Fi ile iletiliyor...");
-
-                    String json;
-                    json.reserve(6500);
-
-                    json += "{";
-                    json += "\"device_id\":\"" + myTowerID + "\",";
-                    json += "\"ip\":\"" + localIP + "\",";
-
-                    json += "\"max_temp\":" + String(incomingData.max_temp, 2) + ",";
-                    json += "\"gas_raw_resistance\":" + String(incomingData.gas_res, 2) + ",";
-
-                    json += "\"battery_level\":" + String(incomingData.battery_pct) + ",";
-                    json += "\"battery_mv\":" + String(incomingData.battery_mv, 1) + ",";
-
-                    json += "\"lat\":" + String(incomingData.lat, 6) + ",";
-                    json += "\"lng\":" + String(incomingData.lng, 6) + ",";
-
-                    json += "\"alert_level\":" + String(incomingData.alert_level) + ",";
-
-                    json += "\"mlx_ok\":";
-                    json += incomingData.mlx_ok ? "true," : "false,";
-
-                    json += "\"gas_ok\":";
-                    json += incomingData.gas_ok ? "true," : "false,";
-
-                    json += "\"gps_fix\":";
-                    json += incomingData.gps_fix ? "true," : "false,";
-
-                    json += "\"servo_angle\":" + String(incomingData.servo_angle) + ",";
-                    json += "\"uptime_ms\":" + String(incomingData.uptime_ms) + ",";
-                    json += "\"read_counter\":" + String(incomingData.read_counter) + ",";
-                    json += "\"error_counter\":" + String(incomingData.error_counter) + ",";
-
-                    json += "\"pixels\":[";
-
-                    for (int i = 0; i < 768; i++) {
-                        // Backend ve frontend için veri hacmini azaltmak adına int gönderiyoruz.
-                        int pVal = constrain((int)incomingData.pixels[i], 0, 255);
-                        json += String(pVal);
-                        if (i < 767) json += ",";
-                    }
-
-                    json += "]}";
-
-                    HTTPClient http;
-                    http.begin(BACKEND_URL);
-                    http.addHeader("Content-Type", "application/json");
-
-                    int httpResponseCode = http.POST(json);
-
-                    if (httpResponseCode == 200) {
-                        Serial.println("✅ Veri Wi-Fi üzerinden iletildi.");
-                    } else {
-                        Serial.print("❌ FastAPI bağlantı hatası! Kod: ");
-                        Serial.println(httpResponseCode);
-                    }
-
-                    http.end();
-                } else {
-                    Serial.println("⚠️ Wi-Fi yok. Tam telemetri paketi backend'e gönderilemedi.");
-                }
-            }
-
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_OFF);
+        xEventGroupClearBits(systemEvents, EVENT_MAINTENANCE_ACTIVE | EVENT_NETWORK_BUSY);
+        Serial.println("📴 Bakım penceresi kapandı.");
+#endif
     }
 }
+
+} // namespace NetworkManager

@@ -1,242 +1,394 @@
 #include "sensor_manager.h"
-#include "globals.h"
+#include "algorithm_manager.h"
+#include "lora_manager.h"
+#include "storage_manager.h"
+#include "network_manager.h"
 
 #include <Wire.h>
 #include <Adafruit_MLX90640.h>
 #include <Adafruit_BME680.h>
-#include <TinyGPSPlus.h>
+#include <esp_sleep.h>
+#include <driver/gpio.h>
+#include <cstring>
 
+namespace {
 Adafruit_MLX90640 mlx;
 Adafruit_BME680 bme;
+bool mlxInitialized = false;
+bool bmeInitialized = false;
+TaskHandle_t sensorTaskHandle = nullptr;
+volatile bool immediateSampleRequested = false;
+volatile uint32_t fastModeUntilMs = 0;
+String peerTriggerSource = "";
+uint32_t peerTriggerSequence = 0;
+RTC_DATA_ATTR uint32_t persistentSequence = 0;
+uint32_t errorCounter = 0;
+uint32_t lastAlertTxMs = 0;
+uint8_t lastAlertTxLevel = FIRE_NORMAL;
 
-TinyGPSPlus gps;
-HardwareSerial GPS_Serial(1);
+struct LocalEventRecord {
+    bool valid;
+    bool confirmed;
+    uint32_t event_sequence;
+    uint32_t created_ms;
+    uint8_t fire_level;
+    uint8_t health_level;
+    float fire_score;
+    float max_temp;
+    uint16_t largest_cluster;
+    uint8_t persistence_count;
+    float gas_drop_pct;
+    int battery_pct;
+};
 
-// GNSS sonraki aşamada debug edilecek.
-// Şimdilik koordinatlar sabit fallback değerleriyle gönderiliyor.
-#define GPS_RX_PIN 38
-#define GPS_TX_PIN 39
-#define GPS_CTRL_PIN 34
-
-#define BATTERY_PIN 1
-#define ADC_CTRL_PIN 37
-
-// Faz-1 saha testi için geçici/sabit koordinat.
-// GNSS düzgün çalışınca currentLat/currentLng otomatik güncellenecek.
-float currentLat = 38.4237;
-float currentLng = 27.1428;
-
-static bool mlxInitialized = false;
-static bool bmeInitialized = false;
-
-static uint32_t readCounter = 0;
-static uint32_t errorCounter = 0;
-
-// Servo entegrasyonu yapılınca burası gerçek açıyla güncellenecek.
-static int currentServoAngle = 0;
+LocalEventRecord localEvents[LOCAL_EVENT_RING_SIZE] = {};
+uint8_t nextLocalEventSlot = 0;
 
 float getBatteryMilliVolts() {
     pinMode(ADC_CTRL_PIN, OUTPUT);
     digitalWrite(ADC_CTRL_PIN, HIGH);
-    delay(50);
-
-    int adcMilliVolts = analogReadMilliVolts(BATTERY_PIN);
-
+    delay(40);
+    const int adcMilliVolts = analogReadMilliVolts(BATTERY_PIN);
     digitalWrite(ADC_CTRL_PIN, LOW);
-
-    // Heltec/ölçüm devresindeki bölücü katsayısı.
-    // Kendi kartındaki gerçek bölücüye göre kalibre edilebilir.
-    float batteryMilliVolts = adcMilliVolts * 4.9f;
-
-    return batteryMilliVolts;
+    return adcMilliVolts * BATTERY_DIVIDER_FACTOR;
 }
 
-int getBatteryPercentageFromMilliVolts(float batteryMilliVolts) {
-    // 1S Li-ion için yaklaşık değer.
-    // LiFePO4 veya farklı batarya kimyasında bu eğri değiştirilmeli.
-    int percentage = map((int)batteryMilliVolts, 3300, 4200, 0, 100);
-    return constrain(percentage, 0, 100);
-}
-
-uint8_t calculateLocalAlertLevel(float maxTemp, float gasRes) {
-    // Yerel LoRa acil alarmı için basit ve güvenli eşikler.
-    // Asıl gelişmiş karar backend'de fire_score ile veriliyor.
-    if (maxTemp >= 90.0f) {
-        return ALERT_CRITICAL;
-    }
-
-    if (maxTemp >= 70.0f) {
-        return ALERT_WARNING;
-    }
-
-    return ALERT_NORMAL;
+int getBatteryPercentage(float mv) {
+    return constrain(map(static_cast<int>(mv), 3300, 4200, 0, 100), 0, 100);
 }
 
 void fillPixelsWithZero(float *pixels) {
-    for (int i = 0; i < 768; i++) {
-        pixels[i] = 0.0f;
+    for (int i = 0; i < 768; ++i) pixels[i] = 0.0f;
+}
+
+SensorDataPacket packetFromRecord(const LocalEventRecord &record) {
+    SensorDataPacket packet = {};
+    packet.sequence = record.event_sequence;
+    packet.fire_level = record.fire_level;
+    packet.health_level = record.health_level;
+    packet.local_fire_score = record.fire_score;
+    packet.max_temp = record.max_temp;
+    packet.largest_hotspot_cluster = record.largest_cluster;
+    packet.persistence_count = record.persistence_count;
+    packet.gas_drop_pct = record.gas_drop_pct;
+    packet.battery_pct = record.battery_pct;
+    packet.network_confirmed = record.confirmed;
+    return packet;
+}
+
+LocalEventRecord *findLocalEvent(uint32_t eventSequence) {
+    for (uint8_t i = 0; i < LOCAL_EVENT_RING_SIZE; ++i) {
+        if (localEvents[i].valid && localEvents[i].event_sequence == eventSequence) {
+            return &localEvents[i];
+        }
+    }
+    return nullptr;
+}
+
+void rememberLocalEvent(const SensorDataPacket &packet, uint32_t eventSequence) {
+    LocalEventRecord *existing = findLocalEvent(eventSequence);
+    LocalEventRecord *slot = existing;
+    if (slot == nullptr) {
+        slot = &localEvents[nextLocalEventSlot];
+        nextLocalEventSlot = (nextLocalEventSlot + 1) % LOCAL_EVENT_RING_SIZE;
+    }
+    slot->valid = true;
+    slot->confirmed = false;
+    slot->event_sequence = eventSequence;
+    slot->created_ms = millis();
+    slot->fire_level = packet.fire_level;
+    slot->health_level = packet.health_level;
+    slot->fire_score = packet.local_fire_score;
+    slot->max_temp = packet.max_temp;
+    slot->largest_cluster = packet.largest_hotspot_cluster;
+    slot->persistence_count = packet.persistence_count;
+    slot->gas_drop_pct = packet.gas_drop_pct;
+    slot->battery_pct = packet.battery_pct;
+}
+
+bool hasThermalEvidence(uint8_t level, float maxTemp, uint16_t cluster) {
+    return level >= FIRE_WATCH &&
+           (maxTemp >= THERMAL_WATCH_MAX_C || cluster >= THERMAL_MIN_CLUSTER_PIXELS);
+}
+
+bool shouldNetworkConfirm(const LocalEventRecord &local, const PeerEvent &peer) {
+    const bool localThermal = hasThermalEvidence(local.fire_level, local.max_temp, local.largest_cluster);
+    const bool peerThermal = hasThermalEvidence(peer.fire_level, peer.max_temp, peer.largest_cluster);
+
+    if (local.fire_level >= FIRE_WARNING && peer.fire_level >= FIRE_WARNING) return true;
+    if (local.fire_level >= FIRE_CRITICAL && peerThermal) return true;
+    if (peer.fire_level >= FIRE_CRITICAL && localThermal) return true;
+    return false;
+}
+
+bool collectSample(SensorDataPacket &packet, float elapsedSeconds) {
+    packet = {};
+    packet.sequence = ++persistentSequence;
+    packet.uptime_ms = millis();
+    packet.lat = TOWER_LATITUDE;
+    packet.lng = TOWER_LONGITUDE;
+    packet.free_heap = ESP.getFreeHeap();
+
+    float maxT = -273.15f;
+    if (mlxInitialized) {
+        const int state = mlx.getFrame(packet.pixels);
+        if (state == 0) {
+            packet.mlx_ok = true;
+            for (int i = 0; i < 768; ++i) maxT = max(maxT, packet.pixels[i]);
+        } else {
+            errorCounter++;
+            fillPixelsWithZero(packet.pixels);
+            Serial.printf("❌ MLX frame hatası: %d\n", state);
+        }
+    } else {
+        errorCounter++;
+        fillPixelsWithZero(packet.pixels);
+    }
+    packet.max_temp = packet.mlx_ok ? maxT : 0.0f;
+
+    if (bmeInitialized && bme.performReading()) {
+        packet.gas_res = bme.gas_resistance;
+        packet.gas_ok = packet.gas_res > 0.0f;
+    } else {
+        errorCounter++;
+        packet.gas_res = 0.0f;
+    }
+
+    packet.battery_mv = getBatteryMilliVolts();
+    packet.battery_pct = getBatteryPercentage(packet.battery_mv);
+    packet.solar_voltage_mv = 0.0f;
+    packet.solar_current_ma = 0.0f;
+
+    AlgorithmManager::analyze(packet, elapsedSeconds);
+    packet.error_counter = errorCounter;
+    return packet.mlx_ok || packet.gas_ok;
+}
+
+void processPeerReport(const PeerEvent &event) {
+    LocalEventRecord *local = findLocalEvent(event.sequence);
+    if (local == nullptr) {
+        StorageManager::logFusionEvent("UNMATCHED_REPORT", event.sequence, nullptr, &event,
+                                       "yerel olay kaydı bulunamadı");
+        return;
+    }
+
+    const uint32_t age = millis() - local->created_ms;
+    if (age > NETWORK_CONFIRM_WINDOW_MS) {
+        SensorDataPacket localPacket = packetFromRecord(*local);
+        StorageManager::logFusionEvent("LATE_REPORT", event.sequence, &localPacket, &event,
+                                       String("age_ms=") + String(age));
+        return;
+    }
+
+    SensorDataPacket localPacket = packetFromRecord(*local);
+    if (shouldNetworkConfirm(*local, event)) {
+        if (!local->confirmed) {
+            local->confirmed = true;
+            local->fire_level = FIRE_CONFIRMED;
+            localPacket.fire_level = FIRE_CONFIRMED;
+            localPacket.network_confirmed = true;
+            StorageManager::logFusionEvent("CONFIRMED", event.sequence, &localPacket, &event,
+                                           "iki direk termal kanıtla teyit etti");
+            LoraManager::queueConfirmation(localPacket, String(event.source), event.sequence);
+            Serial.printf("✅ NETWORK CONFIRMED event=%lu peer=%s\n",
+                          static_cast<unsigned long>(event.sequence), event.source);
+        }
+    } else {
+        StorageManager::logFusionEvent("NOT_CONFIRMED", event.sequence, &localPacket, &event,
+                                       "eşik kombinasyonu yeterli değil");
     }
 }
+
+void processPeerEvents() {
+    if (peerEventQueue == nullptr) return;
+    PeerEvent event = {};
+    while (xQueueReceive(peerEventQueue, &event, 0) == pdPASS) {
+        if (event.type == PEER_EVENT_ALERT) {
+            peerTriggerSource = String(event.source);
+            peerTriggerSequence = event.sequence;
+            fastModeUntilMs = millis() + FAST_MODE_DURATION_MS;
+            immediateSampleRequested = true;
+            StorageManager::logFusionEvent("PEER_WAKE", event.sequence, nullptr, &event,
+                                           "eş alarmı hızlı örneklemeyi tetikledi");
+        } else if (event.type == PEER_EVENT_REPORT) {
+            processPeerReport(event);
+        } else if (event.type == PEER_EVENT_CONFIRMED) {
+            LocalEventRecord *local = findLocalEvent(event.sequence);
+            if (local != nullptr) {
+                local->confirmed = true;
+                local->fire_level = FIRE_CONFIRMED;
+                SensorDataPacket localPacket = packetFromRecord(*local);
+                localPacket.network_confirmed = true;
+                StorageManager::logFusionEvent("CONFIRMED_BY_PEER", event.sequence,
+                                               &localPacket, &event,
+                                               "karşı direk ağ teyidini bildirdi");
+            } else {
+                StorageManager::logFusionEvent("CONFIRM_WITHOUT_LOCAL", event.sequence,
+                                               nullptr, &event,
+                                               "yerel olay kaydı bulunamadı");
+            }
+        }
+    }
+}
+
+void waitLowPower(uint32_t waitMs) {
+    if (waitMs < MIN_LIGHT_SLEEP_MS) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
+        return;
+    }
+
+#if ENABLE_LIGHT_SLEEP
+    const uint32_t graceDeadline = millis() + 1500;
+    while (static_cast<int32_t>(graceDeadline - millis()) > 0) {
+        if (immediateSampleRequested ||
+            (peerEventQueue != nullptr && uxQueueMessagesWaiting(peerEventQueue) > 0)) return;
+        const EventBits_t bits = xEventGroupGetBits(systemEvents);
+        if ((bits & (EVENT_LORA_BUSY | EVENT_NETWORK_BUSY)) == 0 && LoraManager::isIdleForLightSleep()) break;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    const EventBits_t finalBits = xEventGroupGetBits(systemEvents);
+    if (immediateSampleRequested || !LoraManager::isIdleForLightSleep()) return;
+    if ((finalBits & (EVENT_NETWORK_BUSY | EVENT_MAINTENANCE_ACTIVE)) != 0) {
+        vTaskDelay(pdMS_TO_TICKS(waitMs < 100UL ? waitMs : 100UL));
+        return;
+    }
+
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    gpio_wakeup_enable(static_cast<gpio_num_t>(LORA_DIO1_PIN), GPIO_INTR_HIGH_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(waitMs) * 1000ULL);
+    esp_light_sleep_start();
+    LoraManager::notifyIfIrqLineActive();
+#else
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
+#endif
+}
+} // namespace
 
 namespace SensorManager {
 
-    void init() {
-        Serial.println("[CORE 0] Sensörler başlatılıyor...");
+void init() {
+    Serial.println("[CORE 0] Sensörler başlatılıyor...");
+    Wire.begin(SENSOR_I2C_SDA, SENSOR_I2C_SCL);
+    Wire.setClock(400000);
 
-        // GNSS şimdilik kritik değil. Güç pini sonraki aşamada ayrıca debug edilecek.
-        pinMode(GPS_CTRL_PIN, OUTPUT);
-        digitalWrite(GPS_CTRL_PIN, LOW);
-        delay(500);
-
-        GPS_Serial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-
-        Wire.begin(41, 42);
-        Wire.setClock(400000);
-
-        mlxInitialized = mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire);
-        if (mlxInitialized) {
-            mlx.setMode(MLX90640_CHESS);
-            mlx.setRefreshRate(MLX90640_4_HZ);
-            Serial.println("Termal Kamera: ✅ BAĞLANDI");
-        } else {
-            Serial.println("Termal Kamera: ❌ BULUNAMADI");
-        }
-
-        bmeInitialized = bme.begin(0x76, &Wire);
-        if (bmeInitialized) {
-            bme.setGasHeater(320, 150);
-            Serial.println("Gaz Sensörü/BME680: ✅ BAĞLANDI");
-        } else {
-            Serial.println("Gaz Sensörü/BME680: ❌ BULUNAMADI");
-        }
+    mlxInitialized = mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire);
+    if (mlxInitialized) {
+        mlx.setMode(MLX90640_CHESS);
+        mlx.setRefreshRate(MLX90640_4_HZ);
+        Serial.println("Termal Kamera: ✅");
+    } else {
+        Serial.println("Termal Kamera: ❌");
     }
 
-    void taskLoop(void *pvParameters) {
-        unsigned long lastReadTime = 0;
-
-        while (true) {
-            // GNSS şimdilik opsiyonel. Veri gelirse koordinatı günceller.
-            while (GPS_Serial.available() > 0) {
-                char c = GPS_Serial.read();
-                if (gps.encode(c)) {
-                    if (gps.location.isValid()) {
-                        currentLat = gps.location.lat();
-                        currentLng = gps.location.lng();
-                    }
-                }
-            }
-
-            if (millis() - lastReadTime >= (unsigned long)sleep_interval) {
-                lastReadTime = millis();
-
-                SensorDataPacket packet = {};
-                readCounter++;
-
-                packet.uptime_ms = millis();
-                packet.read_counter = readCounter;
-                packet.error_counter = errorCounter;
-
-                packet.lat = currentLat;
-                packet.lng = currentLng;
-                packet.gps_fix = gps.location.isValid();
-
-                packet.servo_angle = currentServoAngle;
-
-                // ------------------------------
-                // Termal kamera okuma
-                // ------------------------------
-                float maxT = 0.0f;
-                bool mlxOkThisRead = false;
-
-                if (mlxInitialized) {
-                    int mlxState = mlx.getFrame(packet.pixels);
-
-                    if (mlxState == 0) {
-                        mlxOkThisRead = true;
-
-                        for (int i = 0; i < 768; i++) {
-                            if (packet.pixels[i] > maxT) {
-                                maxT = packet.pixels[i];
-                            }
-                        }
-                    } else {
-                        errorCounter++;
-                        fillPixelsWithZero(packet.pixels);
-                        Serial.print("❌ MLX90640 frame okuma hatası: ");
-                        Serial.println(mlxState);
-                    }
-                } else {
-                    errorCounter++;
-                    fillPixelsWithZero(packet.pixels);
-                }
-
-                packet.max_temp = maxT;
-                packet.mlx_ok = mlxOkThisRead;
-
-                // ------------------------------
-                // Gaz / BME680 okuma
-                // ------------------------------
-                bool gasOkThisRead = false;
-                float gasResistance = 0.0f;
-
-                if (bmeInitialized && bme.performReading()) {
-                    gasResistance = bme.gas_resistance;
-                    gasOkThisRead = gasResistance > 0.0f;
-                } else {
-                    errorCounter++;
-                    gasResistance = 0.0f;
-                }
-
-                packet.gas_res = gasResistance;
-                packet.gas_ok = gasOkThisRead;
-
-                // ------------------------------
-                // Batarya telemetrisi
-                // ------------------------------
-                packet.battery_mv = getBatteryMilliVolts();
-                packet.battery_pct = getBatteryPercentageFromMilliVolts(packet.battery_mv);
-
-                // ------------------------------
-                // Yerel alarm seviyesi
-                // ------------------------------
-                packet.alert_level = calculateLocalAlertLevel(packet.max_temp, packet.gas_res);
-
-                // ------------------------------
-                // Wi-Fi/backend kuyruğuna tam veri gönder
-                // ------------------------------
-                if (networkDataQueue != NULL) {
-                    if (xQueueSend(networkDataQueue, &packet, pdMS_TO_TICKS(100)) == pdPASS) {
-                        Serial.println("[CORE 0] Veri network kuyruğuna atıldı.");
-                    } else {
-                        Serial.println("⚠️ Network kuyruğu dolu, paket düşürüldü.");
-                    }
-                }
-
-                // ------------------------------
-                // LoRa kuyruğuna sadece uyarı/kritik alarm gönder
-                // ------------------------------
-                if (packet.alert_level >= ALERT_WARNING && loraAlertQueue != NULL) {
-                    if (xQueueSend(loraAlertQueue, &packet, pdMS_TO_TICKS(100)) == pdPASS) {
-                        Serial.println("📡 Alarm LoRa kuyruğuna atıldı.");
-                    } else {
-                        Serial.println("⚠️ LoRa kuyruğu dolu, alarm paketi düşürüldü.");
-                    }
-                }
-
-                Serial.printf(
-                    "[TELEMETRI] T: %.1f C | Gas: %.0f ohm | Bat: %.0f mV (%d%%) | Alert: %d | MLX:%d | GAS:%d | Err:%lu\n",
-                    packet.max_temp,
-                    packet.gas_res,
-                    packet.battery_mv,
-                    packet.battery_pct,
-                    packet.alert_level,
-                    packet.mlx_ok,
-                    packet.gas_ok,
-                    packet.error_counter
-                );
-            }
-
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
+    bmeInitialized = bme.begin(0x76, &Wire);
+    if (bmeInitialized) {
+        bme.setGasHeater(320, 150);
+        Serial.println("BME680: ✅");
+    } else {
+        Serial.println("BME680: ❌");
     }
 }
+
+bool enqueuePeerEvent(const PeerEvent &event) {
+    if (peerEventQueue == nullptr) return false;
+    const bool queued = xQueueSend(peerEventQueue, &event, pdMS_TO_TICKS(50)) == pdPASS;
+    if (queued && sensorTaskHandle != nullptr) xTaskNotifyGive(sensorTaskHandle);
+    return queued;
+}
+
+bool isFastMode() {
+    return static_cast<int32_t>(fastModeUntilMs - millis()) > 0;
+}
+
+void taskLoop(void *pvParameters) {
+    sensorTaskHandle = xTaskGetCurrentTaskHandle();
+    uint32_t lastSampleMs = 0;
+    uint32_t nextSampleMs = millis() + 1000;
+    uint32_t normalSampleCounter = 0;
+
+    while (true) {
+        processPeerEvents();
+        const uint32_t now = millis();
+        const bool due = static_cast<int32_t>(now - nextSampleMs) >= 0;
+        if (due || immediateSampleRequested) {
+            xEventGroupSetBits(systemEvents, EVENT_SENSOR_BUSY);
+            const bool peerTriggered = immediateSampleRequested && peerTriggerSource.length() > 0;
+            const String triggerSource = peerTriggerSource;
+            const uint32_t triggerSequence = peerTriggerSequence;
+            immediateSampleRequested = false;
+
+            const float elapsedSeconds = lastSampleMs == 0
+                ? 1.0f
+                : max(0.001f, (now - lastSampleMs) / 1000.0f);
+            lastSampleMs = now;
+
+            SensorDataPacket packet;
+            collectSample(packet, elapsedSeconds);
+            const char *trigger = peerTriggered ? "PEER_ALERT" : (isFastMode() ? "FAST" : "TIMER");
+
+            const uint32_t eventSequence = peerTriggered ? triggerSequence : packet.sequence;
+            if (packet.fire_level >= FIRE_WATCH || peerTriggered) {
+                rememberLocalEvent(packet, eventSequence);
+            }
+
+            StorageManager::logTelemetry(packet, trigger);
+            StorageManager::logThermalFrame(packet);
+
+            Serial.printf(
+                "[SAMPLE] seq=%lu max=%.1f top5=%.1f amb=%.1f cluster=%u persist=%u "
+                "dT=%.3f gasDrop=%.1f score=%.1f fire=%s health=%s bat=%d%% mode=%s\n",
+                static_cast<unsigned long>(packet.sequence), packet.max_temp, packet.top5_temp,
+                packet.ambient_temp, packet.largest_hotspot_cluster, packet.persistence_count,
+                packet.local_delta_t, packet.gas_drop_pct, packet.local_fire_score,
+                AlgorithmManager::fireLevelName(packet.fire_level),
+                AlgorithmManager::healthLevelName(packet.health_level), packet.battery_pct,
+                isFastMode() ? "FAST" : "NORMAL"
+            );
+
+            // WATCH ilk şüphede diğer direği hemen uyandırır.
+            if (!peerTriggered && packet.fire_level >= FIRE_WATCH && packet.fire_level < FIRE_CONFIRMED) {
+                const uint32_t alertNow = millis();
+                const bool escalation = packet.fire_level > lastAlertTxLevel;
+                const bool cooldownExpired = (alertNow - lastAlertTxMs) >= LORA_ALERT_COOLDOWN_MS;
+                if (lastAlertTxMs == 0 || escalation || cooldownExpired) {
+                    if (LoraManager::queueLocalAlert(packet)) {
+                        lastAlertTxMs = alertNow;
+                        lastAlertTxLevel = packet.fire_level;
+                    }
+                }
+                fastModeUntilMs = millis() + FAST_MODE_DURATION_MS;
+            } else if (!isFastMode() && packet.fire_level == FIRE_NORMAL) {
+                lastAlertTxLevel = FIRE_NORMAL;
+            }
+
+            if (peerTriggered) {
+                LoraManager::queuePeerReport(packet, triggerSource, triggerSequence);
+                peerTriggerSource = "";
+                peerTriggerSequence = 0;
+            }
+
+#if ENABLE_MAINTENANCE_WIFI
+            // Alarm/hızlı doğrulama sırasında Wi-Fi taraması iletişimi ve ölçümü bölmesin.
+            if (!peerTriggered && !isFastMode()) {
+                normalSampleCounter++;
+                if (normalSampleCounter == 1 ||
+                    normalSampleCounter % MAINTENANCE_SCAN_EVERY_SAMPLES == 0) {
+                    NetworkManager::requestMaintenanceScan();
+                }
+            }
+#endif
+
+            const uint32_t interval = isFastMode() ? FAST_SAMPLE_INTERVAL_MS : NORMAL_SAMPLE_INTERVAL_MS;
+            nextSampleMs = millis() + interval;
+            xEventGroupClearBits(systemEvents, EVENT_SENSOR_BUSY);
+        }
+
+        const uint32_t current = millis();
+        uint32_t waitMs = 10;
+        if (static_cast<int32_t>(nextSampleMs - current) > 0) waitMs = nextSampleMs - current;
+        waitLowPower(waitMs);
+    }
+}
+
+} // namespace SensorManager
