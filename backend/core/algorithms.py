@@ -22,6 +22,8 @@ class ThermalAnalyzer:
         now = time.time()
         
         # --- GÜRÜLTÜ FİLTRESİ (Piksel Kümesi Analizi) ---
+        if len(pixels) < 5:
+            raise ValueError("At least five thermal pixels are required")
         sorted_pixels = sorted(pixels, reverse=True)
         top_5_avg_temp = sum(sorted_pixels[:5]) / 5.0
         
@@ -96,16 +98,17 @@ def generate_sensor_data(is_simulating: bool, tower_id: str):
     return matrix.flatten().tolist(), gas_level
 
 def calculate_intersection(lat1, lng1, bearing1, lat2, lng2, bearing2):
-    """İki doğrudan koordinat kesiştirir (Nirengi/Triangulation)."""
-    m1 = math.tan(math.radians(90 - bearing1))
-    m2 = math.tan(math.radians(90 - bearing2))
-    if abs(m1 - m2) < 0.001: 
+    """Approximate bearing intersection with longitude scaling.
+
+    This remains a planar approximation and should be treated as a pilot estimate,
+    not a survey-grade coordinate.
+    """
+    from services.sensor_fusion import calculate_triangulation
+
+    result = calculate_triangulation(lat1, lng1, bearing1, lat2, lng2, bearing2)
+    if result is None:
         return None
-    c1 = lat1 - m1 * lng1
-    c2 = lat2 - m2 * lng2
-    lng_intersect = (c2 - c1) / (m1 - m2)
-    lat_intersect = m1 * lng_intersect + c1
-    return {"lat": lat_intersect, "lng": lng_intersect}
+    return {"lat": result["fire_lat"], "lng": result["fire_lng"]}
 
 def save_thermal_snapshot(pixel_data, node_id, max_temp):
     # Klasör yoksa oluştur

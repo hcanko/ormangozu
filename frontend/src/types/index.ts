@@ -1,9 +1,9 @@
 export interface ThermalData {
   avg_temp: number;
-  delta_t: number;           // Sıcaklık ivmesi
-  gas_level: number;         // Ham direnç
-  gas_ppm_impact: number;    // Gaz anomalisi yüzdesi
-  fire_score: number;        // Yapay zeka yangın skoru
+  delta_t: number;
+  gas_level: number;
+  gas_ppm_impact: number;
+  fire_score: number;
   status: string;
 }
 
@@ -14,16 +14,15 @@ export interface Tower {
   lat: number;
   lng: number;
   bearing: number;
-  status: string; // 'NORMAL' | 'UYARI' | 'KRİTİK' | 'offline'
-  
-  // DONANIM VE SENSÖR BİLGİLERİ
+  status: string;
+  sleep_interval: number;
   is_online: boolean;
   battery: number;
   pixels: number[];
-  is_gps_fixed?: boolean;  
+  max_temp?: number;
+  gas_raw_resistance?: number;
+  is_gps_fixed?: boolean;
   currentData?: ThermalData;
-  
-  // YENİ NESİL ZEKİ SİSTEM VERİLERİ
   fire_score?: number;
   last_update?: string;
 }
@@ -31,10 +30,11 @@ export interface Tower {
 export interface FireLocation {
   lat: number;
   lng: number;
-  confidence_score?: number; // Nirengi doğruluk payı (Gelecek için rezerve)
+  confidence_score?: number;
 }
 
 export interface DashboardData {
   towers: Tower[];
   fireLocation: FireLocation | null;
+  active_alerts?: unknown[];
 }
