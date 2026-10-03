@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useTowers } from '../hooks/useTowers';
-import { Plus, Trash2, Globe, MapPin, Battery, Wifi, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, Globe, MapPin, Battery } from 'lucide-react';
 
 export default function Towers() {
   const { towers } = useTowers();

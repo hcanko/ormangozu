@@ -3,7 +3,6 @@ import random
 import time
 import numpy as np
 from collections import deque
-import matplotlib.pyplot as plt
 import datetime
 import os
 
@@ -111,6 +110,10 @@ def calculate_intersection(lat1, lng1, bearing1, lat2, lng2, bearing2):
     return {"lat": result["fire_lat"], "lng": result["fire_lng"]}
 
 def save_thermal_snapshot(pixel_data, node_id, max_temp):
+    # Snapshot rendering is optional during API startup and test execution.
+    # Import the heavier plotting stack only when a snapshot is requested.
+    import matplotlib.pyplot as plt
+
     # Klasör yoksa oluştur
     if not os.path.exists("snapshots"):
         os.makedirs("snapshots")

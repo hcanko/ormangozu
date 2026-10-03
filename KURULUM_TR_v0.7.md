@@ -38,6 +38,17 @@ Araç `.pubhex` dosyasını da oluşturur. `OrmanGozu_Node/src/secrets.example.h
 
 Aynı OG4/OGC2/OGU1 protokol sürümünü iki karta USB ile yükleyin. **Özel signing PEM veya backend token'ları hiçbir Nest'e yüklenmez.**
 
+Her firmware yüklemesinden sonra cihazı otomatik filo kaydına alın ve yerel
+depolama/LoRa/termal/çevresel sensör öz-testini çalıştırın:
+
+```bash
+python tools/provision_device.py --port COM5 --backend http://127.0.0.1:8000
+```
+
+Araç `WHOAMI` ile eFuse/MAC tabanlı `NEST-...` kimliğini okur; elle cihaz ID'si
+verilmez. Bütün kontroller geçerse backend durumu `READY_FOR_INSTALLATION`
+yapar. GNSS entegrasyonu etkinleşene kadar `location_status=PENDING` normaldir.
+
 ## 3. Backend ve kullanıcı arayüzü
 
 `backend/.env.example` içeriğini gerçek, birbirinden farklı rastgele `OG_CLIENT_TOKEN` (yalnız collector) ve `OG_OPERATOR_TOKEN` (UI/yönetim) ile yerel ortamınıza aktarın. API'yi doğrudan internete açmayın.

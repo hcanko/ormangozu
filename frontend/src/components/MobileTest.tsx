@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useTowers } from '../hooks/useTowers';
 import { Flame, Wind, Activity, Zap, CheckCircle, AlertTriangle, Database, Square, Flag, Eye } from 'lucide-react';
 

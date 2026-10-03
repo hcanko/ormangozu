@@ -32,11 +32,9 @@ def migrate_sqlite_schema() -> None:
         return
 
     inspector = inspect(engine)
-    if "sensor_logs" not in inspector.get_table_names():
-        return
+    tables = set(inspector.get_table_names())
 
-    existing = {column["name"] for column in inspector.get_columns("sensor_logs")}
-    additions = {
+    sensor_additions = {
         "received_at": "DATETIME",
         "source": "VARCHAR DEFAULT 'online'",
         "protocol_version": "INTEGER",
@@ -67,14 +65,45 @@ def migrate_sqlite_schema() -> None:
         "charge_state": "VARCHAR",
     }
 
-    with engine.begin() as connection:
-        for name, sql_type in additions.items():
-            if name not in existing:
-                connection.execute(text(f"ALTER TABLE sensor_logs ADD COLUMN {name} {sql_type}"))
+    tower_additions = {
+        "product_model": "VARCHAR NOT NULL DEFAULT 'MINI_NEST'",
+        "network_role": "VARCHAR NOT NULL DEFAULT 'NODE'",
+        "lifecycle_state": "VARCHAR NOT NULL DEFAULT 'DISCOVERED'",
+        "location_status": "VARCHAR NOT NULL DEFAULT 'PENDING'",
+        "hardware_revision": "VARCHAR",
+        "capabilities_json": "TEXT NOT NULL DEFAULT '{}'",
+        "self_test_json": "TEXT NOT NULL DEFAULT '{}'",
+        "backhaul": "VARCHAR NOT NULL DEFAULT 'NONE'",
+        "primary_hub_id": "VARCHAR",
+        "secondary_hub_id": "VARCHAR",
+        "firmware_version": "VARCHAR",
+        "provisioned_at": "DATETIME",
+        "last_seen_at": "DATETIME",
+    }
 
-        connection.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_sensor_logs_packet_identity "
-                "ON sensor_logs (tower_id, boot_id, sequence)"
+    with engine.begin() as connection:
+        if "sensor_logs" in tables:
+            existing = {column["name"] for column in inspector.get_columns("sensor_logs")}
+            for name, sql_type in sensor_additions.items():
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE sensor_logs ADD COLUMN {name} {sql_type}"))
+
+        if "towers" in tables:
+            existing_towers = {column["name"] for column in inspector.get_columns("towers")}
+            for name, sql_type in tower_additions.items():
+                if name not in existing_towers:
+                    connection.execute(text(f"ALTER TABLE towers ADD COLUMN {name} {sql_type}"))
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_towers_primary_hub_id ON towers (primary_hub_id)")
             )
-        )
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_towers_secondary_hub_id ON towers (secondary_hub_id)")
+            )
+
+        if "sensor_logs" in tables:
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_sensor_logs_packet_identity "
+                    "ON sensor_logs (tower_id, boot_id, sequence)"
+                )
+            )

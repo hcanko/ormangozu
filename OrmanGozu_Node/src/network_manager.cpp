@@ -3,6 +3,7 @@
 #include "storage_manager.h"
 #include "lora_manager.h"
 #include "ota_manager.h"
+#include "sensor_manager.h"
 #include <cstdio>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -150,8 +151,29 @@ void taskLoop(void *pvParameters) {
             String cmd = Serial.readStringUntil('\n');
             cmd.trim();
             if (cmd == "WHOAMI") {
-                Serial.printf("OGIDENT:{\"device_id\":\"%s\",\"firmware\":\"%s\"}\n",
-                    myTowerID.c_str(), FIRMWARE_VERSION);
+                Serial.printf(
+                    "OGIDENT:{\"device_id\":\"%s\",\"firmware\":\"%s\","
+                    "\"hardware_revision\":\"%s\",\"product_model\":\"%s\","
+                    "\"network_role\":\"%s\",\"backhaul\":\"%s\",\"capabilities\":{"
+                    "\"thermal\":%s,\"environmental\":%s,\"smoke\":%s,"
+                    "\"optical\":%s,\"ptz\":%s,\"gnss\":%s,\"solar\":%s,"
+                    "\"battery\":%s,\"relay\":%s,\"lte\":%s,\"satellite\":%s}}\n",
+                    myTowerID.c_str(), FIRMWARE_VERSION, OG_HARDWARE_REVISION,
+                    OG_PRODUCT_MODEL, OG_NETWORK_ROLE, OG_BACKHAUL,
+                    OG_CAP_THERMAL ? "true" : "false",
+                    OG_CAP_ENVIRONMENTAL ? "true" : "false",
+                    OG_CAP_SMOKE ? "true" : "false",
+                    OG_CAP_OPTICAL ? "true" : "false",
+                    OG_CAP_PTZ ? "true" : "false",
+                    OG_CAP_GNSS ? "true" : "false",
+                    OG_CAP_SOLAR ? "true" : "false",
+                    OG_CAP_BATTERY ? "true" : "false",
+                    OG_CAP_RELAY ? "true" : "false",
+                    OG_CAP_LTE ? "true" : "false",
+                    OG_CAP_SATELLITE ? "true" : "false");
+            }
+            else if (cmd == "SELFTEST") {
+                Serial.printf("OGSELFTEST:%s\n", SensorManager::statusJson().c_str());
             }
             else if (cmd == "MAINT ON") runMaintenance();
             else if (cmd.startsWith("OTA ")) {

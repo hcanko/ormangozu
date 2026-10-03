@@ -21,6 +21,21 @@ class TowerDB(Base):
     sleep_interval = Column(Integer, default=300)
     battery_level = Column(Float, default=100.0)
     is_online = Column(Boolean, default=False)
+    # Product identity and network responsibility are intentionally separate.
+    # A future NEST_VISION may still be a NODE, while a NEST_HUB is normally a HUB.
+    product_model = Column(String, default="MINI_NEST", nullable=False)
+    network_role = Column(String, default="NODE", nullable=False)
+    lifecycle_state = Column(String, default="DISCOVERED", nullable=False)
+    location_status = Column(String, default="PENDING", nullable=False)
+    hardware_revision = Column(String, nullable=True)
+    capabilities_json = Column(Text, default="{}", nullable=False)
+    self_test_json = Column(Text, default="{}", nullable=False)
+    backhaul = Column(String, default="NONE", nullable=False)
+    primary_hub_id = Column(String, nullable=True, index=True)
+    secondary_hub_id = Column(String, nullable=True, index=True)
+    firmware_version = Column(String, nullable=True)
+    provisioned_at = Column(DateTime, nullable=True)
+    last_seen_at = Column(DateTime, nullable=True)
 
 
 class SensorLogDB(Base):

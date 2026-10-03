@@ -291,6 +291,13 @@ void waitLowPower(uint32_t waitMs) {
 
 namespace SensorManager {
 
+String statusJson() {
+    return String("{\"storage\":") + (StorageManager::isReady() ? "true" : "false") +
+           ",\"lora\":" + (LoraManager::isReady() ? "true" : "false") +
+           ",\"thermal\":" + (mlxInitialized ? "true" : "false") +
+           ",\"environmental\":" + (bmeInitialized ? "true" : "false") + "}";
+}
+
 void init() {
     Serial.println("[CORE 0] Sensörler başlatılıyor...");
     Wire.begin(SENSOR_I2C_SDA, SENSOR_I2C_SCL);

@@ -69,6 +69,25 @@ def claim_next(base_url: str, token: str, bridge: str) -> dict | None:
     return response if isinstance(response, dict) else None
 
 
+def register_identity(base_url: str, token: str, identity: dict) -> dict | None:
+    """Discover an attached bridge without downgrading a prior self-test state."""
+    device_id = identity.get("device_id")
+    firmware = identity.get("firmware")
+    if not isinstance(device_id, str) or not isinstance(firmware, str):
+        return None
+    payload = {
+        "device_id": device_id,
+        "firmware_version": firmware,
+        "hardware_revision": identity.get("hardware_revision"),
+        "product_model": identity.get("product_model", "MINI_NEST"),
+        "network_role": identity.get("network_role", "NODE"),
+        "capabilities": identity.get("capabilities", {}),
+        "backhaul": identity.get("backhaul", "NONE"),
+    }
+    response = backend_json(base_url.rstrip("/") + "/api/devices/register", token, payload=payload)
+    return response if isinstance(response, dict) else None
+
+
 def replay_existing(path: Path, base_url: str, token: str) -> tuple[int, int]:
     """Re-send prior offline JSONL; backend has stable event keys for idempotency.
 
@@ -160,8 +179,13 @@ def main(argv: list[str] | None = None) -> int:
                         if isinstance(value, str) and value.startswith("NEST-") and len(value) == 17:
                             bridge_id = value
                             print(f"[bridge] {bridge_id} {ident.get('firmware','')}")
-                    except (ValueError, json.JSONDecodeError):
-                        pass
+                            if args.backend:
+                                registered = register_identity(args.backend, token, ident)
+                                if registered:
+                                    print(f"[registry] {bridge_id} {registered.get('lifecycle_state')}")
+                    except (ValueError, json.JSONDecodeError, urllib.error.URLError,
+                            urllib.error.HTTPError, RuntimeError, TimeoutError) as exc:
+                        print(f"[registry] bridge discovery not forwarded: {exc}", file=sys.stderr)
                     continue
                 try:
                     record = parse_serial_line(raw)

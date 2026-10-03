@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routers import generate_dashboard_data, manager, router
 from api.mesh_events import router as mesh_router
 from api.control_api import router as control_router
+from api.device_registry import router as device_router
 from models import orm
 from models.database import Base, SessionLocal, engine, migrate_sqlite_schema
 from models.orm import SystemSettingsDB
@@ -79,7 +80,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "X-Client-Token"],
 )
 
@@ -96,6 +97,7 @@ async def private_api_headers(request, call_next):
 app.include_router(router, prefix="/api")
 app.include_router(mesh_router, prefix="/api")
 app.include_router(control_router, prefix="/api")
+app.include_router(device_router, prefix="/api")
 
 
 if __name__ == "__main__":

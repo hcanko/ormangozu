@@ -8,6 +8,36 @@
 #define FIRMWARE_VERSION "0.7.0-signed-lora-ota"
 #define OG_FIRMWARE_BUILD 700
 
+// Product identity is reported during USB provisioning. Product and network
+// role are separate so later Vision/Industrial models can share the protocol.
+#ifndef OG_PRODUCT_MODEL
+#define OG_PRODUCT_MODEL "MINI_NEST"
+#endif
+#ifndef OG_NETWORK_ROLE
+#define OG_NETWORK_ROLE "NODE"
+#endif
+#ifndef OG_HARDWARE_REVISION
+#define OG_HARDWARE_REVISION "PILOT-V1"
+#endif
+#ifndef OG_BACKHAUL
+#define OG_BACKHAUL "NONE"
+#endif
+
+// Report only capabilities that are actually wired and enabled in this build.
+// GNSS, solar telemetry, PTZ and cellular stay false until their drivers and
+// physical installation have passed bench tests.
+#define OG_CAP_THERMAL 1
+#define OG_CAP_ENVIRONMENTAL 1
+#define OG_CAP_SMOKE 0
+#define OG_CAP_OPTICAL 0
+#define OG_CAP_PTZ OG_ENABLE_PAN_TILT
+#define OG_CAP_GNSS 0
+#define OG_CAP_SOLAR 0
+#define OG_CAP_BATTERY 1
+#define OG_CAP_RELAY 1
+#define OG_CAP_LTE 0
+#define OG_CAP_SATELLITE 0
+
 // Sabit direk konumu. Her cihaza yüklemeden önce gerekirse değiştir.
 #define TOWER_LATITUDE 0.0f // MUST SET per device to measured site; 0,0 = unknown
 #define TOWER_LONGITUDE 0.0f // GNSS integration intentionally not claimed as complete

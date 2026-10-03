@@ -18,6 +18,26 @@
 | USB ve OTA araçları | `tools/` | JSONL collector, yeniden iletim, P-256 imzalama, kesintiden devam eden LoRa OTA, RF hesap |
 | Otomatik test | `tests/`, `backend/tests/`, `.github/workflows/verify-v070.yml` | Python/TypeScript/ESP build CI; varsayılan CI `.bin` test amaçlı anahtarla oluşur, dağıtıma UYGUN DEĞİLDİR |
 
+## Cihaz ailesi ve hazırlama
+
+Ürün modeli ile ağ rolü ayrı tutulur: `MINI_NEST`, `NEST_VISION`,
+`NEST_INDUSTRIAL`, `NEST_HUB`, `NEST_RELAY`; ağ rolleri ise `NODE`, `HUB`,
+`RELAY`, `BASE` değerleridir. Çok sayıdaki Mini Nest bir **Nest Swarm** oluşturur;
+bir veya daha fazla Nest Hub gelecekte LoRa trafiğini LTE/uydu/IP omurgasına taşır.
+Bu sürüm Hub/GSM sürücüsü içermez, yalnız ortak kimlik ve filo sözleşmesini hazırlar.
+
+Firmware yüklenmiş cihaz USB'ye bağlandıktan sonra gerçek eFuse/MAC kimliği,
+etkin yetenekleri ve öz-test sonucu elle ID girilmeden kaydedilebilir:
+
+```bash
+set OG_CLIENT_TOKEN=collector-token
+python tools/provision_device.py --port COM5 --backend http://127.0.0.1:8000
+```
+
+Başarılı cihaz `READY_FOR_INSTALLATION` olur. GNSS henüz etkin olmadığı için
+konum `PENDING` kalır; PTZ, güneş ölçümü ve LTE de fiziksel/sürücü doğrulaması
+geçmeden cihaz tarafından yetenek olarak ilan edilmez.
+
 ## Pilot mimarisi
 
 `Bilgisayar (API + UI + LoRa OTA CLI) ⇄ USB ile bağlı Nest A (radyo köprüsü) ⇄ LoRa ⇄ Nest B ⇄ [gerekirse 1–2 aracı Nest] ⇄ Hedef Nest`.

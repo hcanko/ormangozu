@@ -12,6 +12,7 @@ namespace SensorManager {
     bool enqueueControlRequest(const ControlRequest &request);
     void requestImmediateSample();
     void requestFastMode();
+    String statusJson();
 }
 
 #endif

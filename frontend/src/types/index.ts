@@ -25,6 +25,19 @@ export interface Tower {
   currentData?: ThermalData;
   fire_score?: number;
   last_update?: string;
+  product_model?: 'MINI_NEST' | 'NEST_VISION' | 'NEST_INDUSTRIAL' | 'NEST_HUB' | 'NEST_RELAY';
+  network_role?: 'NODE' | 'HUB' | 'RELAY' | 'BASE';
+  lifecycle_state?: 'DISCOVERED' | 'READY_FOR_INSTALLATION' | 'LOCATION_PENDING' | 'ACTIVE' | 'TEST_FAILED' | 'MAINTENANCE' | 'DISABLED' | 'REVOKED';
+  location_status?: 'PENDING' | 'GNSS_ACQUIRING' | 'GNSS_FIXED' | 'MANUAL' | 'UNAVAILABLE';
+  hardware_revision?: string | null;
+  capabilities?: Record<string, boolean>;
+  self_test?: Record<string, boolean | null>;
+  backhaul?: 'NONE' | 'LORA_LONG_HAUL' | 'LTE' | 'SATELLITE' | 'ETHERNET' | 'WIFI';
+  primary_hub_id?: string | null;
+  secondary_hub_id?: string | null;
+  firmware_version?: string | null;
+  provisioned_at?: string | null;
+  last_seen_at?: string | null;
 }
 
 export interface FireLocation {

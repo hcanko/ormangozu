@@ -157,7 +157,10 @@ bool transmitOnce(const String &payload) {
     xEventGroupSetBits(systemEvents, EVENT_LORA_BUSY);
     radio.standby();
     radioIrqFlag = false;
-    const int16_t state = radio.transmit(payload);
+    // RadioLib 6.6 takes a mutable Arduino String even though it does not need
+    // to change the caller's payload.
+    String wirePayload(payload);
+    const int16_t state = radio.transmit(wirePayload);
     const bool ok = state == RADIOLIB_ERR_NONE;
     if (!ok) Serial.printf("❌ LoRa TX hatası: %d\n", state);
     if(ok && !payload.startsWith("OGU1|")) lastOtherTxMs=millis();
@@ -209,7 +212,8 @@ bool relayFrame(const String &body, const String &source, const String &destinat
     for(auto &entry:relaySeen) {
        if(entry.hash==h && uint32_t(millis()-entry.at)<1700UL) return false;
     }
-    relaySeen[relayPointer]={h,millis()};
+    relaySeen[relayPointer].hash = h;
+    relaySeen[relayPointer].at = millis();
     relayPointer=(relayPointer+1)%32;
     String forwarded=identity+"|"+String(hop+1);
     String payload=forwarded+"|"+MeshAuth::tag(forwarded);

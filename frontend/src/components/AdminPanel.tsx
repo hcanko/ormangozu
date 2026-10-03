@@ -1,11 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Settings, Cpu, Zap, Database, Flag, Square, Play, Save, Terminal } from 'lucide-react';
 
 export default function AdminPanel() {
   const [towers, setTowers] = useState<any[]>([]);
   const [isLogging, setIsLogging] = useState(false);
   const [checkpointNote, setCheckpointNote] = useState("");
-  const [isSimulating, setIsSimulating] = useState(false);
   
   // 🔥 YENİ: override_temp state'e eklendi
   const [weights, setWeights] = useState({

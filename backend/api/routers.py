@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import math
 import os
 import time
@@ -43,6 +44,14 @@ from services.sensor_fusion import GLOBAL_WEIGHTS, SensorFusion, apply_calibrati
 
 def utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _json_object(value: str | None) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError):
+        return {}
 
 def operator_guard(x_client_token: str | None = Header(default=None)) -> None:
     operator_auth(x_client_token)
@@ -246,6 +255,10 @@ async def receive_sensor_data(
             sleep_interval=300,
             battery_level=data.battery_level,
             is_online=True,
+            lifecycle_state="ACTIVE",
+            location_status="GNSS_FIXED" if data.gps_fix else "PENDING",
+            firmware_version=data.firmware_version,
+            last_seen_at=utcnow(),
         )
         db.add(tower)
         db.flush()
@@ -254,6 +267,10 @@ async def receive_sensor_data(
             tower.ip = data.ip
         tower.lat = data.lat
         tower.lng = data.lng
+        tower.firmware_version = data.firmware_version or tower.firmware_version
+        tower.last_seen_at = utcnow()
+        if data.gps_fix:
+            tower.location_status = "GNSS_FIXED"
 
     pixels = data.pixels
     gas_resistance = data.gas_raw_resistance
@@ -461,6 +478,19 @@ async def generate_dashboard_data(db: Session) -> dict[str, Any]:
             "max_temp": live.get("raw_max_temp", 0.0),
             "gas_raw_resistance": live.get("gas_level", 0.0),
             "fire_score": live.get("fire_score", 0.0),
+            "product_model": tower.product_model or "MINI_NEST",
+            "network_role": tower.network_role or "NODE",
+            "lifecycle_state": tower.lifecycle_state or "DISCOVERED",
+            "location_status": tower.location_status or "PENDING",
+            "hardware_revision": tower.hardware_revision,
+            "capabilities": _json_object(tower.capabilities_json),
+            "self_test": _json_object(tower.self_test_json),
+            "backhaul": tower.backhaul or "NONE",
+            "primary_hub_id": tower.primary_hub_id,
+            "secondary_hub_id": tower.secondary_hub_id,
+            "firmware_version": tower.firmware_version,
+            "provisioned_at": tower.provisioned_at,
+            "last_seen_at": tower.last_seen_at,
             "currentData": {
                 "avg_temp": live.get("avg_temp", 0.0),
                 "delta_t": live.get("delta_t", 0.0),
@@ -680,6 +710,10 @@ async def import_device_log(file: UploadFile = File(...), db: Session = Depends(
                     bearing=0.0,
                     sleep_interval=300,
                     is_online=False,
+                    lifecycle_state="DISCOVERED",
+                    location_status="PENDING" if not lat and not lng else "MANUAL",
+                    firmware_version=_first(row, "firmware_version"),
+                    last_seen_at=utcnow(),
                 )
                 db.add(tower)
 

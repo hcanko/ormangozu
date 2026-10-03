@@ -5,14 +5,66 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+ProductModel = Literal["MINI_NEST", "NEST_VISION", "NEST_INDUSTRIAL", "NEST_HUB", "NEST_RELAY"]
+NetworkRole = Literal["NODE", "HUB", "RELAY", "BASE"]
+LifecycleState = Literal[
+    "DISCOVERED", "READY_FOR_INSTALLATION", "LOCATION_PENDING", "ACTIVE",
+    "TEST_FAILED", "MAINTENANCE", "DISABLED", "REVOKED",
+]
+LocationStatus = Literal["PENDING", "GNSS_ACQUIRING", "GNSS_FIXED", "MANUAL", "UNAVAILABLE"]
+BackhaulType = Literal["NONE", "LORA_LONG_HAUL", "LTE", "SATELLITE", "ETHERNET", "WIFI"]
+
+
+class DeviceCapabilities(BaseModel):
+    thermal: bool = True
+    environmental: bool = True
+    smoke: bool = False
+    optical: bool = False
+    ptz: bool = False
+    gnss: bool = False
+    solar: bool = False
+    battery: bool = True
+    relay: bool = True
+    lte: bool = False
+    satellite: bool = False
+
+
+class DeviceSelfTest(BaseModel):
+    storage: bool | None = None
+    lora: bool | None = None
+    thermal: bool | None = None
+    environmental: bool | None = None
+
+    def passed(self, capabilities: DeviceCapabilities | None = None) -> bool | None:
+        values = [self.storage, self.lora]
+        if capabilities is None or capabilities.thermal:
+            values.append(self.thermal)
+        if capabilities is None or capabilities.environmental:
+            values.append(self.environmental)
+        if all(value is None for value in values):
+            return None
+        return all(value is True for value in values)
+
+
 class TowerCreate(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=120)
     ip: str = "0.0.0.0"
-    lat: float = Field(ge=-90, le=90)
-    lng: float = Field(ge=-180, le=180)
+    lat: float = Field(default=0.0, ge=-90, le=90)
+    lng: float = Field(default=0.0, ge=-180, le=180)
     bearing: float = Field(default=0.0, ge=0, lt=360)
     sleep_interval: int = Field(default=300, ge=1, le=86400)
+    product_model: ProductModel = "MINI_NEST"
+    network_role: NetworkRole = "NODE"
+    lifecycle_state: LifecycleState = "DISCOVERED"
+    location_status: LocationStatus = "PENDING"
+    hardware_revision: str | None = Field(default=None, max_length=64)
+    capabilities_json: str = "{}"
+    self_test_json: str = "{}"
+    backhaul: BackhaulType = "NONE"
+    primary_hub_id: str | None = Field(default=None, max_length=64)
+    secondary_hub_id: str | None = Field(default=None, max_length=64)
+    firmware_version: str | None = Field(default=None, max_length=64)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -44,8 +96,49 @@ class Tower(BaseModel):
     currentData: ThermalData | None = None
     fire_score: float = 0.0
     last_update: datetime | None = None
+    product_model: ProductModel = "MINI_NEST"
+    network_role: NetworkRole = "NODE"
+    lifecycle_state: LifecycleState = "DISCOVERED"
+    location_status: LocationStatus = "PENDING"
+    hardware_revision: str | None = None
+    capabilities: DeviceCapabilities = Field(default_factory=DeviceCapabilities)
+    self_test: DeviceSelfTest = Field(default_factory=DeviceSelfTest)
+    backhaul: BackhaulType = "NONE"
+    primary_hub_id: str | None = None
+    secondary_hub_id: str | None = None
+    firmware_version: str | None = None
+    provisioned_at: datetime | None = None
+    last_seen_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class DeviceRegistration(BaseModel):
+    device_id: str = Field(pattern=r"^NEST-[0-9A-F]{12}$")
+    firmware_version: str = Field(min_length=1, max_length=64)
+    hardware_revision: str | None = Field(default=None, max_length=64)
+    product_model: ProductModel = "MINI_NEST"
+    network_role: NetworkRole = "NODE"
+    capabilities: DeviceCapabilities = Field(default_factory=DeviceCapabilities)
+    self_test: DeviceSelfTest = Field(default_factory=DeviceSelfTest)
+    backhaul: BackhaulType = "NONE"
+
+
+class DeviceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    lifecycle_state: LifecycleState | None = None
+    location_status: LocationStatus | None = None
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    bearing: float | None = Field(default=None, ge=0, lt=360)
+    primary_hub_id: str | None = Field(default=None, max_length=64)
+    secondary_hub_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def require_coordinate_pair(self) -> "DeviceUpdate":
+        if (self.lat is None) != (self.lng is None):
+            raise ValueError("lat and lng must be provided together")
+        return self
 
 
 class SensorDataIncoming(BaseModel):
