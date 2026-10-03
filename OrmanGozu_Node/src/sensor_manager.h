@@ -9,6 +9,9 @@ namespace SensorManager {
     void taskLoop(void *pvParameters);
     bool enqueuePeerEvent(const PeerEvent &event);
     bool isFastMode();
+    bool enqueueControlRequest(const ControlRequest &request);
+    void requestImmediateSample();
+    void requestFastMode();
 }
 
 #endif

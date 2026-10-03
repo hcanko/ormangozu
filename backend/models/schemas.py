@@ -89,6 +89,13 @@ class SensorDataIncoming(BaseModel):
     gas_drop_pct: float | None = Field(default=None, ge=0, le=100)
     local_fire_score: float | None = Field(default=None, ge=0, le=100)
     local_status: str | None = Field(default=None, max_length=24)
+    ambient_temp: float | None = None
+    hotspot_threshold: float | None = None
+    largest_hotspot_cluster: int | None = Field(default=None, ge=0)
+    persistence_count: int | None = Field(default=None, ge=0)
+    fire_level: int | None = Field(default=None, ge=0, le=4)
+    health_level: int | None = Field(default=None, ge=0, le=2)
+    network_confirmed: bool | None = None
 
     @field_validator("pixels")
     @classmethod

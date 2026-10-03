@@ -1,12 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Settings, Cpu, Zap, Database, Flag, Square, Play, Save, Terminal } from 'lucide-react';
 import { apiUrl } from '../lib/api';
+import { Link } from 'react-router-dom';
 
 export default function AdminPanel() {
   const [towers, setTowers] = useState<any[]>([]);
   const [isLogging, setIsLogging] = useState(false);
   const [checkpointNote, setCheckpointNote] = useState("");
-  const [isSimulating, setIsSimulating] = useState(false);
   
   // 🔥 YENİ: override_temp state'e eklendi
   const [weights, setWeights] = useState({
@@ -63,12 +63,6 @@ export default function AdminPanel() {
       setWeights(result.new_settings);
       alert("Algoritma ayarları başarıyla güncellendi!");
     } catch (err) { alert("Güncelleme başarısız!"); }
-  };
-
-  const sendGlobalCommand = async (command: string, value: number) => {
-    for (const tower of towers) {
-      await fetch(apiUrl(`/towers/${tower.id}/command?command=${command}&value=${value}`), { method: 'POST' });
-    }
   };
 
   return (
@@ -144,11 +138,8 @@ export default function AdminPanel() {
           <h2 style={{ fontSize: '1.1rem', marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Zap color="#f59e0b" /> Global Donanım Yönetimi
           </h2>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '15px' }}>
-            <button onClick={() => sendGlobalCommand('sleep', 100)} style={{ padding: '12px', backgroundColor: '#3b82f6', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>TÜMÜNÜ HIZLANDIR</button>
-            <button onClick={() => sendGlobalCommand('sleep', 5000)} style={{ padding: '12px', backgroundColor: '#475569', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>TÜMÜNÜ UYUT</button>
-            <button onClick={() => window.confirm("Tüm cihazlar resetlensin mi?") && sendGlobalCommand('reboot', 1)} style={{ padding: '12px', backgroundColor: '#991b1b', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>GLOBAL REBOOT</button>
-          </div>
+          <p style={{ fontSize: 13, color: '#94a3b8' }}>Toplu uyutma/reboot pilotta devre dışı. Yangın algılama her Nest üzerinde bağımsız kalır; müdahaleler hedef cihaz başına kimlik doğrulamalıdır.</p>
+          <Link to="/control" style={{ display: 'inline-block', padding: 12, borderRadius: 8, background: '#3b82f6', color: 'white', textDecoration: 'none', fontWeight: 600 }}>Nest Kontrol paneli</Link>
         </section>
 
         {/* 4. KULE DURUM LİSTESİ */}
@@ -178,7 +169,7 @@ export default function AdminPanel() {
                     <td><span style={{ color: t.is_online ? '#10b981' : '#ef4444' }}>● {t.is_online ? 'ONLINE' : 'OFFLINE'}</span></td>
                     <td>%{t.battery || 0}</td>
                     <td>
-                      <button onClick={() => fetch(apiUrl(`/towers/${t.id}/command?command=reboot&value=1`), {method:'POST'})} style={{ backgroundColor: 'transparent', border: '1px solid #ef4444', color: '#ef4444', padding: '4px 8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' }}>Reboot</button>
+                      <Link to={`/control?target=${encodeURIComponent(t.id)}`} style={{ backgroundColor: 'transparent', border: '1px solid #60a5fa', color: '#60a5fa', padding: '4px 8px', borderRadius: '4px', textDecoration: 'none', fontSize: '0.75rem' }}>Kontrol</Link>
                     </td>
                   </tr>
                 ))

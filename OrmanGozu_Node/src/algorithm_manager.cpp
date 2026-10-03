@@ -232,7 +232,7 @@ const char *fireLevelName(uint8_t level) {
         case FIRE_WATCH: return "WATCH";
         case FIRE_WARNING: return "WARNING";
         case FIRE_CRITICAL: return "CRITICAL";
-        case FIRE_CONFIRMED: return "CONFIRMED";
+        case FIRE_NETWORK_CORROBORATED: return "NETWORK_CORROBORATED";
         default: return "NORMAL";
     }
 }

@@ -3,8 +3,9 @@ import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet'; 
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { useTowers } from '../hooks/useTowers';
-import { Battery, Wifi, WifiOff, Thermometer, Wind, Power, Activity, X, Database, Square, Flag, AlertTriangle, RefreshCw, Radar } from 'lucide-react'; // 🔥 EKLENDİ: Radar ikonu
+import { Battery, Wifi, WifiOff, Thermometer, Wind, Activity, X, Database, Square, Flag, Radar } from 'lucide-react'; // 🔥 EKLENDİ: Radar ikonu
 import { apiUrl } from '../lib/api';
+import { useNavigate } from 'react-router-dom';
 
 // Vite uyumlu Leaflet İkon Düzeltmesi
 import iconRetinaUrl from 'leaflet/dist/images/marker-icon-2x.png';
@@ -27,6 +28,7 @@ const fireIcon = new L.Icon({
 });
 
 export default function DashboardMap() {
+  const navigate = useNavigate();
   const { towers, fireLocation } = useTowers();
   const [selectedTowerId, setSelectedTowerId] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -119,12 +121,6 @@ export default function DashboardMap() {
     } catch (err) { console.error("Checkpoint hatası"); }
   };
 
-  const sendCommand = async (command: string, value: number) => {
-    if (!selectedTower) return;
-    try {
-      await fetch(apiUrl(`/towers/${selectedTower.id}/command?command=${command}&value=${value}`), { method: 'POST' });
-    } catch (err) { alert('Cihaza ulaşılamadı.'); }
-  };
 
   return (
     <div style={{ display: 'flex', height: '100%', width: '100%', position: 'relative' }}>
@@ -248,28 +244,11 @@ export default function DashboardMap() {
             </div>
           )}
 
-          <h3 style={{ fontSize: '1rem', color: '#374151', marginTop: '10px', marginBottom: '10px' }}>Güç & Hız Kontrolü</h3>
-          
-          <button onClick={() => sendCommand('sleep', 100)} style={{ width: '100%', padding: '10px', backgroundColor: '#3b82f6', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', marginBottom: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
-            <Activity size={18} /> Cihazı Hızlandır (Sahada Test)
-          </button>
-
-          <button onClick={() => sendCommand('sleep', 5000)} style={{ width: '100%', padding: '10px', backgroundColor: '#6b7280', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
-            <Power size={18} /> Uyku Modu (Güç Tasarrufu)
-          </button>
-
-          <h3 style={{ fontSize: '1rem', color: '#374151', marginTop: '15px', marginBottom: '10px' }}>Acil Durum & Müdahale</h3>
-          
-          <button onClick={() => sendCommand('siren', 1)} style={{ width: '100%', padding: '10px', backgroundColor: '#f59e0b', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', marginBottom: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', fontWeight: 'bold' }}>
-            <AlertTriangle size={18} /> Bölgesel Sireni Tetikle
-          </button>
-
-          <button onClick={() => {
-            if(window.confirm("Cihazı uzaktan yeniden başlatmak istediğinize emin misiniz?")) {
-              sendCommand('reboot', 1);
-            }
-          }} style={{ width: '100%', padding: '10px', backgroundColor: '#ef4444', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', fontWeight: 'bold' }}>
-            <RefreshCw size={18} /> Cihazı Yeniden Başlat (Reboot)
+          <h3 style={{ fontSize: '1rem', color: '#374151', marginTop: '10px' }}>Adresli Nest müdahalesi</h3>
+          <p style={{ fontSize: '0.85rem', color: '#64748b' }}>Eski IP üzerinden kontrol devre dışı. Ölçüm, hızlı tarama ve servo (takılıysa) için kimlik doğrulamalı kontrol ekranını kullan.</p>
+          <button onClick={() => navigate(`/control?target=${encodeURIComponent(selectedTower.id)}`)}
+            style={{ width: '100%', padding: '11px', backgroundColor: '#3b82f6', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center' }}>
+            <Activity size={18} /> Seçili Nest'i kontrol et
           </button>
         </div>
       )}

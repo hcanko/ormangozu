@@ -1,0 +1,1 @@
+Bu klasörde v0.6.0/v0.6.1 TARİHSEL raporları yer alır; mevcut kurulum için yalnız kök `README.md` ve `KURULUM_TR_v0.7.md` kullanılmalıdır. v0.6.x OG4/OGC1 eski radyo sürümü v0.7 OG4/OGC2/OGU1 ile doğrudan uyumlu değildir.

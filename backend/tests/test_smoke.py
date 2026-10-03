@@ -9,6 +9,9 @@ if DB_PATH.exists():
     DB_PATH.unlink()
 os.environ["DATABASE_URL"] = f"sqlite:///{DB_PATH}"
 os.environ["ENABLE_HTTP_WHISPER"] = "0"
+os.environ["OG_CLIENT_TOKEN"] = "smoke-test-collector"
+os.environ["OG_OPERATOR_TOKEN"] = "smoke-test-operator"
+os.environ["OG_ENABLE_LEGACY_SENSOR_HTTP"] = "1"
 
 from fastapi.testclient import TestClient
 from main import app
@@ -39,11 +42,11 @@ def test_health_and_sensor_flow():
     with TestClient(app) as client:
         assert client.get("/api/health").status_code == 200
 
-        response = client.post("/api/sensor-data", json=sample_payload())
+        response = client.post("/api/sensor-data", json=sample_payload(), headers={"X-Client-Token":"smoke-test-collector"})
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "success"
 
-        duplicate = client.post("/api/sensor-data", json=sample_payload())
+        duplicate = client.post("/api/sensor-data", json=sample_payload(), headers={"X-Client-Token":"smoke-test-collector"})
         assert duplicate.status_code == 200
         assert duplicate.json()["status"] == "duplicate"
 
@@ -53,6 +56,7 @@ def test_health_and_sensor_flow():
 
         settings = client.post(
             "/api/settings/calibration",
+            headers={"X-Client-Token":"smoke-test-operator"},
             json={
                 "weight_delta_t": 4,
                 "weight_temp": 3,
@@ -64,6 +68,7 @@ def test_health_and_sensor_flow():
         assert settings.status_code == 422
         settings = client.post(
             "/api/settings/calibration",
+            headers={"X-Client-Token":"smoke-test-operator"},
             json={
                 "weight_delta_t": 0.8,
                 "weight_temp": 0.6,
@@ -84,6 +89,7 @@ def test_csv_import():
     with TestClient(app) as client:
         response = client.post(
             "/api/import/device-log",
+            headers={"X-Client-Token":"smoke-test-operator"},
             files={"file": ("log.csv", csv_data, "text/csv")},
         )
         assert response.status_code == 200, response.text

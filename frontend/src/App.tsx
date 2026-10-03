@@ -1,14 +1,16 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import Layout from './components/Layout';
-import DashboardMap from './components/DashboardMap';
-import Settings from './components/Settings';
-import Towers from './components/Towers';
-import Alerts from './components/Alerts';
-import Analytics from './components/Analytics';
-import MobileTest from './components/MobileTest';
+import Layout from './pages/Layout';
+import DashboardMap from './pages/DashboardMap';
+import Settings from './pages/Settings';
+import Towers from './pages/Towers';
+import Alerts from './pages/Alerts';
+import Analytics from './pages/Analytics';
+import MobileTest from './pages/MobileTest';
+import WhisperPilot from './components/WhisperPilot';
+import ControlCenter from './pages/ControlCenter';
 
 // 🔥 EKSİK OLAN SATIRI EKLEDİK (Dosya yolunun components içinde olduğunu varsayıyorum)
-import AdminPanel from './components/AdminPanel'; 
+import AdminPanel from './pages/AdminPanel'; 
 
 export default function App() {
   return (
@@ -23,7 +25,9 @@ export default function App() {
           <Route path="admin" element={<AdminPanel />} />
           
           <Route path="towers" element={<Towers />} /> 
-          <Route path="alerts" element={<Alerts />} /> 
+          <Route path="alerts" element={<Alerts />} />
+          <Route path="whisper" element={<WhisperPilot />} />
+          <Route path="control" element={<ControlCenter />} /> 
           <Route path="analytics" element={<Analytics />} /> 
           <Route path="settings" element={<Settings />} /> 
         </Route>

@@ -13,6 +13,7 @@ from fastapi import (
     Depends,
     File,
     HTTPException,
+    Header,
     Query,
     UploadFile,
     WebSocket,
@@ -22,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from api.logger import logger
+from api.mesh_events import auth as collector_auth, operator_auth
 from core.algorithms import GasAnalyzer, ThermalAnalyzer, calculate_intersection, generate_sensor_data
 from models.database import get_db
 from models.orm import SensorLogDB, SystemSettingsDB, TestEventDB, TowerDB
@@ -41,6 +43,18 @@ from services.sensor_fusion import GLOBAL_WEIGHTS, SensorFusion, apply_calibrati
 
 def utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+def operator_guard(x_client_token: str | None = Header(default=None)) -> None:
+    operator_auth(x_client_token)
+
+
+def legacy_sensor_guard(x_client_token: str | None = Header(default=None)) -> None:
+    # Old HTTP device upload is disabled in the offline LoRa pilot, and must
+    # never accept unauthenticated sensor data if explicitly enabled in a lab.
+    if os.getenv("OG_ENABLE_LEGACY_SENSOR_HTTP", "0") != "1":
+        raise HTTPException(status_code=403, detail="Legacy HTTP sensor ingest disabled")
+    collector_auth(x_client_token)
+
 
 router = APIRouter()
 SIMULATION_ACTIVE = False
@@ -134,7 +148,7 @@ def get_calibration() -> dict[str, float]:
     return dict(GLOBAL_WEIGHTS)
 
 
-@router.post("/settings/calibration")
+@router.post("/settings/calibration", dependencies=[Depends(operator_guard)])
 def update_calibration(settings: CalibrationSettings, db: Session = Depends(get_db)) -> dict[str, Any]:
     normalized = apply_calibration(settings.model_dump())
     row = db.query(SystemSettingsDB).filter(SystemSettingsDB.id == 1).first()
@@ -158,7 +172,7 @@ def update_calibration(settings: CalibrationSettings, db: Session = Depends(get_
     }
 
 
-@router.post("/towers", response_model=TowerCreate, status_code=201)
+@router.post("/towers", response_model=TowerCreate, status_code=201, dependencies=[Depends(operator_guard)])
 def create_tower(tower: TowerCreate, db: Session = Depends(get_db)):
     db_tower = TowerDB(**tower.model_dump())
     db.add(db_tower)
@@ -176,7 +190,7 @@ def get_towers(db: Session = Depends(get_db)):
     return db.query(TowerDB).order_by(TowerDB.id.asc()).all()
 
 
-@router.delete("/towers/{tower_id}")
+@router.delete("/towers/{tower_id}", dependencies=[Depends(operator_guard)])
 def delete_tower(tower_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     tower = db.query(TowerDB).filter(TowerDB.id == tower_id).first()
     if tower is None:
@@ -189,7 +203,7 @@ def delete_tower(tower_id: str, db: Session = Depends(get_db)) -> dict[str, str]
     return {"message": "Silindi"}
 
 
-@router.post("/simulation/toggle")
+@router.post("/simulation/toggle", dependencies=[Depends(operator_guard)])
 def toggle_simulation() -> dict[str, bool]:
     global SIMULATION_ACTIVE
     SIMULATION_ACTIVE = not SIMULATION_ACTIVE
@@ -211,7 +225,7 @@ def _packet_is_duplicate(db: Session, data: SensorDataIncoming) -> bool:
     )
 
 
-@router.post("/sensor-data")
+@router.post("/sensor-data", dependencies=[Depends(legacy_sensor_guard)])
 async def receive_sensor_data(
     data: SensorDataIncoming,
     background_tasks: BackgroundTasks,
@@ -290,6 +304,8 @@ async def receive_sensor_data(
         "raw_max_temp": data.max_temp,
         "device_fire_score": data.local_fire_score,
         "device_status": data.local_status,
+        "health_level": data.health_level,
+        "network_confirmed": data.network_confirmed,
     }
 
     tower.battery_level = data.battery_level
@@ -316,6 +332,13 @@ async def receive_sensor_data(
         device_delta_t=data.local_delta_t,
         gas_ema=data.gas_ema,
         device_gas_drop_pct=data.gas_drop_pct,
+        ambient_temp=data.ambient_temp,
+        hotspot_threshold=data.hotspot_threshold,
+        largest_hotspot_cluster=data.largest_hotspot_cluster,
+        persistence_count=data.persistence_count,
+        fire_level=data.fire_level,
+        health_level=data.health_level,
+        network_confirmed=data.network_confirmed,
         device_fire_score=data.local_fire_score,
         device_status=data.local_status,
         battery_level=data.battery_level,
@@ -378,6 +401,8 @@ async def receive_sensor_data(
         "error_counter": data.error_counter,
         "device_fire_score": data.local_fire_score,
         "device_status": data.local_status,
+        "health_level": data.health_level,
+        "network_confirmed": data.network_confirmed,
     }
     await manager.broadcast(update_message)
 
@@ -473,38 +498,27 @@ def get_logger_status() -> dict[str, bool]:
     return {"is_logging": logger.is_logging}
 
 
-@router.post("/logger/toggle")
+@router.post("/logger/toggle", dependencies=[Depends(operator_guard)])
 def toggle_logger() -> dict[str, bool]:
     return {"is_logging": logger.toggle()}
 
 
-@router.post("/logger/checkpoint")
+@router.post("/logger/checkpoint", dependencies=[Depends(operator_guard)])
 def mark_checkpoint(req: CheckpointRequest) -> dict[str, str]:
     if not logger.mark_event(req.note):
         raise HTTPException(status_code=400, detail="Kayıt aktif değil")
     return {"status": "ok"}
 
 
-@router.post("/towers/{tower_id}/command")
-async def send_command_to_tower(
-    tower_id: str,
-    command: str = Query(pattern=r"^[a-zA-Z0-9_-]{1,32}$"),
-    value: int = Query(ge=0, le=86_400_000),
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    tower = db.query(TowerDB).filter(TowerDB.id == tower_id).first()
-    if tower is None:
-        raise HTTPException(status_code=404, detail="Direk bulunamadı")
-    if not tower.ip or tower.ip == "0.0.0.0":
-        raise HTTPException(status_code=409, detail="Direğin erişilebilir bir IP adresi yok")
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"http://{tower.ip}/{command}?value={value}", timeout=5.0)
-            response.raise_for_status()
-            return {"status": "success", "response": response.text}
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Cihaz komutu iletilemedi: {exc}") from exc
+@router.post("/towers/{tower_id}/command", deprecated=True)
+def deprecated_ip_command(tower_id: str) -> dict[str, str]:
+    # The legacy endpoint accepted arbitrary, unauthenticated HTTP paths and
+    # forwarded them to a stored device IP. It MUST NOT be used for v0.6.1.
+    # Keep a clear migration response for older dashboard clients, but do not
+    # send any command or mutate equipment.
+    del tower_id
+    raise HTTPException(status_code=410,
+                        detail="Legacy IP commands disabled. Use authenticated /api/control/commands")
 
 
 @router.get("/alerts", response_model=list[AlertResponse])
@@ -546,7 +560,7 @@ def get_tower_history(
     ]
 
 
-@router.post("/test-events", response_model=TestEventResponse, status_code=201)
+@router.post("/test-events", response_model=TestEventResponse, status_code=201, dependencies=[Depends(operator_guard)])
 def create_test_event(event: TestEventCreate, db: Session = Depends(get_db)):
     row = TestEventDB(**event.model_dump(exclude={"timestamp"}), timestamp=event.timestamp or utcnow())
     db.add(row)
@@ -577,6 +591,12 @@ def _to_float(value: str | None, default: float | None = None) -> float | None:
     return float(value.replace(",", "."))
 
 
+def _sensor_optional(value: str | None) -> float | None:
+    """Nest sentinel -1 means unavailable, not a measured solar value."""
+    v = _to_float(value)
+    return None if v == -1 else v
+
+
 def _to_int(value: str | None, default: int | None = None) -> int | None:
     if value is None:
         return default
@@ -601,7 +621,7 @@ def _parse_datetime(value: str | None) -> datetime:
     return utcnow()
 
 
-@router.post("/import/device-log", response_model=OfflineImportResult)
+@router.post("/import/device-log", response_model=OfflineImportResult, dependencies=[Depends(operator_guard)])
 async def import_device_log(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="CSV dosyası yükleyin")
@@ -668,8 +688,8 @@ async def import_device_log(file: UploadFile = File(...), db: Session = Depends(
             gas = _to_float(_first(row, "gas_raw_resistance", "gas_raw", "Ham_Gaz_Ohm"), 0.0)
             server_delta = _to_float(_first(row, "delta_t", "Delta_T"), 0.0)
             gas_drop = _to_float(_first(row, "gas_drop_pct", "gas_ppm_impact", "Gaz_PPM_Etkisi"), 0.0)
-            score = _to_float(_first(row, "fire_score", "Yangin_Skoru"), 0.0)
-            status = _first(row, "status", "Durum") or "NORMAL"
+            score = _to_float(_first(row, "fire_score", "local_fire_score", "Yangin_Skoru"), 0.0)
+            status = _first(row, "status", "fire_status", "Durum") or "NORMAL"
             timestamp = _parse_datetime(_first(row, "timestamp", "received_at", "Zaman"))
 
             db.add(SensorLogDB(
@@ -681,7 +701,7 @@ async def import_device_log(file: UploadFile = File(...), db: Session = Depends(
                 boot_id=boot_id,
                 sequence=sequence,
                 firmware_version=_first(row, "firmware_version"),
-                device_timestamp=_to_int(_first(row, "device_timestamp")),
+                device_timestamp=_to_int(_first(row, "device_timestamp", "uptime_ms")),
                 max_temp_raw=max_raw,
                 avg_temp=top5,
                 top5_temp=top5,
@@ -694,11 +714,19 @@ async def import_device_log(file: UploadFile = File(...), db: Session = Depends(
                 gas_ema=_to_float(_first(row, "gas_ema")),
                 device_gas_drop_pct=_to_float(_first(row, "device_gas_drop_pct"), gas_drop),
                 device_fire_score=_to_float(_first(row, "local_fire_score", "device_fire_score"), score),
-                device_status=_first(row, "local_status", "device_status") or status,
+                device_status=_first(row, "local_status", "device_status", "fire_status") or status,
+                sample_trigger=_first(row, "trigger"),
+                ambient_temp=_to_float(_first(row, "ambient_temp")),
+                hotspot_threshold=_to_float(_first(row, "hotspot_threshold")),
+                largest_hotspot_cluster=_to_int(_first(row, "largest_hotspot_cluster")),
+                persistence_count=_to_int(_first(row, "persistence_count")),
+                fire_level=_to_int(_first(row, "fire_level")),
+                health_level=_to_int(_first(row, "health_level")),
+                network_confirmed=(_first(row, "network_confirmed") or "false").lower() in {"1", "true", "yes"},
                 battery_level=_to_float(_first(row, "battery_level", "battery_pct", "Pil")),
                 battery_mv=_to_float(_first(row, "battery_mv")),
-                solar_voltage_mv=_to_float(_first(row, "solar_voltage_mv")),
-                solar_current_ma=_to_float(_first(row, "solar_current_ma")),
+                solar_voltage_mv=_sensor_optional(_first(row, "solar_voltage_mv")),
+                solar_current_ma=_sensor_optional(_first(row, "solar_current_ma")),
                 charge_state=_first(row, "charge_state"),
                 lat=lat,
                 lng=lng,

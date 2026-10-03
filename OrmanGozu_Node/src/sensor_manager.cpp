@@ -3,6 +3,8 @@
 #include "lora_manager.h"
 #include "storage_manager.h"
 #include "network_manager.h"
+#include "control_manager.h"
+#include "ota_manager.h"
 
 #include <Wire.h>
 #include <Adafruit_MLX90640.h>
@@ -20,6 +22,11 @@ TaskHandle_t sensorTaskHandle = nullptr;
 volatile bool immediateSampleRequested = false;
 volatile uint32_t fastModeUntilMs = 0;
 String peerTriggerSource = "";
+uint32_t peerTriggerBoot = 0;
+// One ongoing scan per two-Nest pilot; report the strongest sample after 30s.
+struct PeerScan { bool active = false; uint32_t started_ms = 0; uint32_t origin_boot = 0;
+                  uint32_t sequence = 0; String source; SensorDataPacket best = {}; bool has_best = false; };
+PeerScan peerScan;
 uint32_t peerTriggerSequence = 0;
 RTC_DATA_ATTR uint32_t persistentSequence = 0;
 uint32_t errorCounter = 0;
@@ -30,6 +37,7 @@ struct LocalEventRecord {
     bool valid;
     bool confirmed;
     uint32_t event_sequence;
+    uint32_t origin_boot;
     uint32_t created_ms;
     uint8_t fire_level;
     uint8_t health_level;
@@ -76,17 +84,17 @@ SensorDataPacket packetFromRecord(const LocalEventRecord &record) {
     return packet;
 }
 
-LocalEventRecord *findLocalEvent(uint32_t eventSequence) {
+LocalEventRecord *findLocalEvent(uint32_t eventSequence, uint32_t originBoot) {
     for (uint8_t i = 0; i < LOCAL_EVENT_RING_SIZE; ++i) {
-        if (localEvents[i].valid && localEvents[i].event_sequence == eventSequence) {
+        if (localEvents[i].valid && localEvents[i].event_sequence == eventSequence && localEvents[i].origin_boot == originBoot) {
             return &localEvents[i];
         }
     }
     return nullptr;
 }
 
-void rememberLocalEvent(const SensorDataPacket &packet, uint32_t eventSequence) {
-    LocalEventRecord *existing = findLocalEvent(eventSequence);
+void rememberLocalEvent(const SensorDataPacket &packet, uint32_t eventSequence, uint32_t originBoot) {
+    LocalEventRecord *existing = findLocalEvent(eventSequence, originBoot);
     LocalEventRecord *slot = existing;
     if (slot == nullptr) {
         slot = &localEvents[nextLocalEventSlot];
@@ -95,6 +103,7 @@ void rememberLocalEvent(const SensorDataPacket &packet, uint32_t eventSequence) 
     slot->valid = true;
     slot->confirmed = false;
     slot->event_sequence = eventSequence;
+    slot->origin_boot = originBoot;
     slot->created_ms = millis();
     slot->fire_level = packet.fire_level;
     slot->health_level = packet.health_level;
@@ -156,8 +165,9 @@ bool collectSample(SensorDataPacket &packet, float elapsedSeconds) {
 
     packet.battery_mv = getBatteryMilliVolts();
     packet.battery_pct = getBatteryPercentage(packet.battery_mv);
-    packet.solar_voltage_mv = 0.0f;
-    packet.solar_current_ma = 0.0f;
+    // No solar current/voltage sensor is wired in the baseline: -1 = NOT MEASURED.
+    packet.solar_voltage_mv = -1.0f;
+    packet.solar_current_ma = -1.0f;
 
     AlgorithmManager::analyze(packet, elapsedSeconds);
     packet.error_counter = errorCounter;
@@ -165,7 +175,8 @@ bool collectSample(SensorDataPacket &packet, float elapsedSeconds) {
 }
 
 void processPeerReport(const PeerEvent &event) {
-    LocalEventRecord *local = findLocalEvent(event.sequence);
+    if (event.origin_boot != myBootCounter) return;
+    LocalEventRecord *local = findLocalEvent(event.sequence, event.origin_boot);
     if (local == nullptr) {
         StorageManager::logFusionEvent("UNMATCHED_REPORT", event.sequence, nullptr, &event,
                                        "yerel olay kaydı bulunamadı");
@@ -184,13 +195,13 @@ void processPeerReport(const PeerEvent &event) {
     if (shouldNetworkConfirm(*local, event)) {
         if (!local->confirmed) {
             local->confirmed = true;
-            local->fire_level = FIRE_CONFIRMED;
-            localPacket.fire_level = FIRE_CONFIRMED;
+            local->fire_level = FIRE_NETWORK_CORROBORATED;
+            localPacket.fire_level = FIRE_NETWORK_CORROBORATED;
             localPacket.network_confirmed = true;
-            StorageManager::logFusionEvent("CONFIRMED", event.sequence, &localPacket, &event,
-                                           "iki direk termal kanıtla teyit etti");
+            StorageManager::logFusionEvent("NETWORK_CORROBORATED", event.sequence, &localPacket, &event,
+                                           "ağ destekli şüphe; kesin yangın tanısı değildir");
             LoraManager::queueConfirmation(localPacket, String(event.source), event.sequence);
-            Serial.printf("✅ NETWORK CONFIRMED event=%lu peer=%s\n",
+            Serial.printf("✅ NETWORK CORROBORATED event=%lu peer=%s\n",
                           static_cast<unsigned long>(event.sequence), event.source);
         }
     } else {
@@ -204,8 +215,21 @@ void processPeerEvents() {
     PeerEvent event = {};
     while (xQueueReceive(peerEventQueue, &event, 0) == pdPASS) {
         if (event.type == PEER_EVENT_ALERT) {
+            ControlManager::forceAuto("peer fire watch");
+            if (peerScan.active) {
+                StorageManager::logFusionEvent("PEER_SCAN_BUSY", event.sequence, nullptr, &event,
+                                                "ongoing 30s scan has priority");
+                continue;
+            }
+            peerScan.active = true;
+            peerScan.has_best = false;
+            peerScan.started_ms = millis();
+            peerScan.origin_boot = event.origin_boot;
+            peerScan.sequence = event.sequence;
+            peerScan.source = String(event.source);
             peerTriggerSource = String(event.source);
             peerTriggerSequence = event.sequence;
+            peerTriggerBoot = event.origin_boot;
             fastModeUntilMs = millis() + FAST_MODE_DURATION_MS;
             immediateSampleRequested = true;
             StorageManager::logFusionEvent("PEER_WAKE", event.sequence, nullptr, &event,
@@ -213,10 +237,10 @@ void processPeerEvents() {
         } else if (event.type == PEER_EVENT_REPORT) {
             processPeerReport(event);
         } else if (event.type == PEER_EVENT_CONFIRMED) {
-            LocalEventRecord *local = findLocalEvent(event.sequence);
+            LocalEventRecord *local = findLocalEvent(event.sequence, event.origin_boot);
             if (local != nullptr) {
                 local->confirmed = true;
-                local->fire_level = FIRE_CONFIRMED;
+                local->fire_level = FIRE_NETWORK_CORROBORATED;
                 SensorDataPacket localPacket = packetFromRecord(*local);
                 localPacket.network_confirmed = true;
                 StorageManager::logFusionEvent("CONFIRMED_BY_PEER", event.sequence,
@@ -290,6 +314,19 @@ void init() {
     }
 }
 
+void requestImmediateSample() {
+    immediateSampleRequested = true;
+    if (sensorTaskHandle) xTaskNotifyGive(sensorTaskHandle);
+}
+void requestFastMode() {
+    fastModeUntilMs = millis() + FAST_MODE_DURATION_MS;
+}
+bool enqueueControlRequest(const ControlRequest &request) {
+    if (!remoteControlQueue) return false;
+    const bool queued = xQueueSend(remoteControlQueue, &request, 0) == pdPASS;
+    if (queued && sensorTaskHandle) xTaskNotifyGive(sensorTaskHandle);
+    return queued;
+}
 bool enqueuePeerEvent(const PeerEvent &event) {
     if (peerEventQueue == nullptr) return false;
     const bool queued = xQueueSend(peerEventQueue, &event, pdMS_TO_TICKS(50)) == pdPASS;
@@ -305,10 +342,12 @@ void taskLoop(void *pvParameters) {
     sensorTaskHandle = xTaskGetCurrentTaskHandle();
     uint32_t lastSampleMs = 0;
     uint32_t nextSampleMs = millis() + 1000;
-    uint32_t normalSampleCounter = 0;
+    uint32_t lastTelemetrySaved = 0;
+    uint32_t lastFrameSaved = 0;
 
     while (true) {
         processPeerEvents();
+        ControlManager::processPending();
         const uint32_t now = millis();
         const bool due = static_cast<int32_t>(now - nextSampleMs) >= 0;
         if (due || immediateSampleRequested) {
@@ -316,6 +355,7 @@ void taskLoop(void *pvParameters) {
             const bool peerTriggered = immediateSampleRequested && peerTriggerSource.length() > 0;
             const String triggerSource = peerTriggerSource;
             const uint32_t triggerSequence = peerTriggerSequence;
+
             immediateSampleRequested = false;
 
             const float elapsedSeconds = lastSampleMs == 0
@@ -325,15 +365,56 @@ void taskLoop(void *pvParameters) {
 
             SensorDataPacket packet;
             collectSample(packet, elapsedSeconds);
+            ControlManager::onSample(packet);
             const char *trigger = peerTriggered ? "PEER_ALERT" : (isFastMode() ? "FAST" : "TIMER");
 
             const uint32_t eventSequence = peerTriggered ? triggerSequence : packet.sequence;
-            if (packet.fire_level >= FIRE_WATCH || peerTriggered) {
-                rememberLocalEvent(packet, eventSequence);
+            if (peerScan.active) {
+                if (!peerScan.has_best || packet.local_fire_score > peerScan.best.local_fire_score) {
+                    peerScan.best = packet;
+                    peerScan.has_best = true;
+                    rememberLocalEvent(packet, peerScan.sequence, peerScan.origin_boot);
+                }
             }
 
-            StorageManager::logTelemetry(packet, trigger);
-            StorageManager::logThermalFrame(packet);
+            const uint32_t savedNow = millis();
+            // Volatile safety snapshot for remote OTA commit gating; avoid flashing
+            // during alarms or from a depleted battery.
+            // Confirm a freshly booted OTA partition only after the local thermal
+            // loop and radio are actually usable, not merely after setup().
+            if (packet.mlx_ok && packet.gas_ok && LoraManager::isReady())
+                OtaManager::confirmBootIfHealthy();
+            gCurrentFireLevel = packet.fire_level;
+            gBatteryPct = packet.battery_pct;
+            if (packet.fire_level >= FIRE_WATCH) gLastFireWatchMs = millis();
+            const bool noteworthy = packet.fire_level >= FIRE_WATCH || peerTriggered || isFastMode();
+            if (noteworthy || lastTelemetrySaved == 0 ||
+                savedNow - lastTelemetrySaved >= TELEMETRY_BASELINE_LOG_MS) {
+                StorageManager::logTelemetry(packet, trigger);
+                lastTelemetrySaved = savedNow;
+            }
+            if (noteworthy || lastFrameSaved == 0 ||
+                savedNow - lastFrameSaved >= FRAME_BASELINE_LOG_MS) {
+                StorageManager::logThermalFrame(packet);
+                lastFrameSaved = savedNow;
+            }
+            // Lightweight structured sample for the PC. Raw pixels stay in
+            // LittleFS, NOT in the LoRa/USB live telemetry event.
+            Serial.printf(
+                "OGTELEM:{\"device_id\":\"%s\",\"boot\":%lu,\"sequence\":%lu,"
+                "\"uptime_ms\":%lu,\"firmware\":\"%s\",\"max_temp\":%.2f,"
+                "\"ambient_temp\":%.2f,\"top5_temp\":%.2f,\"hotspot_threshold\":%.2f,"
+                "\"cluster\":%u,\"persistence\":%u,\"gas_res\":%.2f,"
+                "\"gas_drop_pct\":%.2f,\"score\":%.1f,\"level\":%u,\"health\":%u,"
+                "\"battery_mv\":%.1f,\"battery_pct\":%d,\"mlx_ok\":%s,\"gas_ok\":%s}\n",
+                myTowerID.c_str(), static_cast<unsigned long>(myBootCounter),
+                static_cast<unsigned long>(packet.sequence), static_cast<unsigned long>(packet.uptime_ms),
+                FIRMWARE_VERSION, packet.max_temp, packet.ambient_temp, packet.top5_temp,
+                packet.hotspot_threshold, static_cast<unsigned>(packet.largest_hotspot_cluster),
+                static_cast<unsigned>(packet.persistence_count), packet.gas_res,
+                packet.gas_drop_pct, packet.local_fire_score, static_cast<unsigned>(packet.fire_level),
+                static_cast<unsigned>(packet.health_level), packet.battery_mv, packet.battery_pct,
+                packet.mlx_ok ? "true" : "false", packet.gas_ok ? "true" : "false");
 
             Serial.printf(
                 "[SAMPLE] seq=%lu max=%.1f top5=%.1f amb=%.1f cluster=%u persist=%u "
@@ -347,12 +428,16 @@ void taskLoop(void *pvParameters) {
             );
 
             // WATCH ilk şüphede diğer direği hemen uyandırır.
-            if (!peerTriggered && packet.fire_level >= FIRE_WATCH && packet.fire_level < FIRE_CONFIRMED) {
+            if (!peerScan.active && !peerTriggered && packet.fire_level >= FIRE_WATCH && packet.fire_level < FIRE_NETWORK_CORROBORATED) {
                 const uint32_t alertNow = millis();
                 const bool escalation = packet.fire_level > lastAlertTxLevel;
                 const bool cooldownExpired = (alertNow - lastAlertTxMs) >= LORA_ALERT_COOLDOWN_MS;
                 if (lastAlertTxMs == 0 || escalation || cooldownExpired) {
                     if (LoraManager::queueLocalAlert(packet)) {
+                        // Retain ONLY emitted alert events, not every 2s fast-mode
+                        // sample. Otherwise a 6-slot ring overwrites the event
+                        // before the peer's 30-second REPORT arrives.
+                        rememberLocalEvent(packet, packet.sequence, myBootCounter);
                         lastAlertTxMs = alertNow;
                         lastAlertTxLevel = packet.fire_level;
                     }
@@ -362,22 +447,19 @@ void taskLoop(void *pvParameters) {
                 lastAlertTxLevel = FIRE_NORMAL;
             }
 
-            if (peerTriggered) {
-                LoraManager::queuePeerReport(packet, triggerSource, triggerSequence);
+            if (peerScan.active && peerScan.has_best &&
+                millis() - peerScan.started_ms >= PEER_SCAN_WINDOW_MS) {
+                LoraManager::queuePeerReport(peerScan.best, peerScan.source,
+                                             peerScan.origin_boot, peerScan.sequence);
+                StorageManager::logFusionEvent("PEER_SCAN_COMPLETE", peerScan.sequence,
+                    &peerScan.best, nullptr, "30s rapid scan report queued");
+                peerScan.active = false;
                 peerTriggerSource = "";
                 peerTriggerSequence = 0;
+                peerTriggerBoot = 0;
             }
 
-#if ENABLE_MAINTENANCE_WIFI
-            // Alarm/hızlı doğrulama sırasında Wi-Fi taraması iletişimi ve ölçümü bölmesin.
-            if (!peerTriggered && !isFastMode()) {
-                normalSampleCounter++;
-                if (normalSampleCounter == 1 ||
-                    normalSampleCounter % MAINTENANCE_SCAN_EVERY_SAMPLES == 0) {
-                    NetworkManager::requestMaintenanceScan();
-                }
-            }
-#endif
+// Wi-Fi is deliberately NOT scanned periodically; maintenance needs a physical USB command.
 
             const uint32_t interval = isFastMode() ? FAST_SAMPLE_INTERVAL_MS : NORMAL_SAMPLE_INTERVAL_MS;
             nextSampleMs = millis() + interval;
@@ -387,7 +469,9 @@ void taskLoop(void *pvParameters) {
         const uint32_t current = millis();
         uint32_t waitMs = 10;
         if (static_cast<int32_t>(nextSampleMs - current) > 0) waitMs = nextSampleMs - current;
-        waitLowPower(waitMs);
+        // Queue notifications wake SensorTask immediately. Only manual mode
+        // needs a frequent deadline check; preserve normal pilot power budget.
+        waitLowPower(ControlManager::manualActive() && waitMs > 1000UL ? 1000UL : waitMs);
     }
 }
 

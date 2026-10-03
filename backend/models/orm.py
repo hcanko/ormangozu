@@ -53,6 +53,15 @@ class SensorLogDB(Base):
     device_gas_drop_pct = Column(Float, nullable=True)
     device_fire_score = Column(Float, nullable=True)
     device_status = Column(String, nullable=True)
+    # OG4 offline sample features. Store scalar context; full 768-pixel frames remain in OGFR.
+    sample_trigger = Column(String, nullable=True)
+    ambient_temp = Column(Float, nullable=True)
+    hotspot_threshold = Column(Float, nullable=True)
+    largest_hotspot_cluster = Column(Integer, nullable=True)
+    persistence_count = Column(Integer, nullable=True)
+    fire_level = Column(Integer, nullable=True)
+    health_level = Column(Integer, nullable=True)
+    network_confirmed = Column(Boolean, nullable=True)
 
     battery_level = Column(Float, nullable=True)
     battery_mv = Column(Float, nullable=True)

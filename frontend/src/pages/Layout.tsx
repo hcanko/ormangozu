@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Map, RadioTower, AlertTriangle, Settings, Activity } from 'lucide-react';
+import { Map, RadioTower, AlertTriangle, Settings, Activity, Radio, SlidersHorizontal } from 'lucide-react';
 
 export default function Layout() {
   const location = useLocation();
@@ -9,6 +9,8 @@ export default function Layout() {
     { path: '/towers', name: 'Direk Yönetimi', icon: <RadioTower size={20} /> },
     { path: '/alerts', name: 'Alarm Geçmişi', icon: <AlertTriangle size={20} /> },
     { path: '/analytics', name: 'Analitik', icon: <Activity size={20} /> },
+    { path: '/whisper', name: 'Whisper Pilot', icon: <Radio size={20} /> },
+    { path: '/control', name: 'Nest Kontrol', icon: <SlidersHorizontal size={20} /> },
     { path: '/settings', name: 'Sistem Ayarları', icon: <Settings size={20} /> },
   ];
 

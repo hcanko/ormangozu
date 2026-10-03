@@ -7,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import generate_dashboard_data, manager, router
+from api.mesh_events import router as mesh_router
+from api.control_api import router as control_router
 from models import orm
 from models.database import Base, SessionLocal, engine, migrate_sqlite_schema
 from models.orm import SystemSettingsDB
@@ -60,9 +62,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OrmanGozu API",
-    version="0.1.0-pilot",
+    version="0.7.0-pilot",
     description="Offline saha kayıtları, sensör füzyonu ve canlı dashboard API'si",
     lifespan=lifespan,
+    docs_url="/docs" if os.getenv("OG_ENABLE_API_DOCS", "0") == "1" else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if os.getenv("OG_ENABLE_API_DOCS", "0") == "1" else None,
 )
 
 cors_env = os.getenv(
@@ -74,12 +79,24 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-Client-Token"],
 )
 
+@app.middleware("http")
+async def private_api_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if request.url.path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 app.include_router(router, prefix="/api")
+app.include_router(mesh_router, prefix="/api")
+app.include_router(control_router, prefix="/api")
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

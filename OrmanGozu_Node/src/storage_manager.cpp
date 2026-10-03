@@ -2,6 +2,7 @@
 #include "algorithm_manager.h"
 
 #include <LittleFS.h>
+#include <Preferences.h>
 #include <math.h>
 
 namespace {
@@ -11,7 +12,7 @@ const char *TELEMETRY_PATH = "/telemetry_0.csv";
 const char *LORA_PATH = "/lora_0.csv";
 const char *FUSION_PATH = "/fusion_0.csv";
 const char *FRAME_PATHS[FRAME_RING_FILE_COUNT] = {
-    "/frames_0.bin", "/frames_1.bin", "/frames_2.bin"
+    "/frames_0.bin", "/frames_1.bin"
 };
 
 uint16_t crc16(const uint8_t *data, size_t len) {
@@ -88,6 +89,7 @@ struct FrameHeader {
     uint32_t magic;
     uint16_t version;
     uint16_t pixel_count;
+    uint32_t boot_counter;  // Joins thermal frame to telemetry across cold reboots.
     uint32_t sequence;
     uint32_t uptime_ms;
     int16_t max_temp_x10;
@@ -107,7 +109,12 @@ namespace StorageManager {
 bool init() {
 #if ENABLE_LITTLEFS_LOGGING
     storageMutex = xSemaphoreCreateMutex();
-    ready = LittleFS.begin(true);
+    Preferences pref;
+    pref.begin("ogstorage", false);
+    bool provisioned = pref.getBool("provisioned", false);
+    ready = LittleFS.begin(!provisioned); // first provisioning only; never erase existing logs on later failure
+    if (ready && !provisioned) pref.putBool("provisioned", true);
+    pref.end();
     if (!ready) {
         Serial.println("❌ LittleFS başlatılamadı.");
         return false;
@@ -166,8 +173,9 @@ void logThermalFrame(const SensorDataPacket &p) {
 
     FrameHeader h = {};
     h.magic = 0x4F474652; // OGFR
-    h.version = 2;
+    h.version = 3;
     h.pixel_count = 768;
+    h.boot_counter = myBootCounter;
     h.sequence = p.sequence;
     h.uptime_ms = p.uptime_ms;
     h.max_temp_x10 = static_cast<int16_t>(lroundf(p.max_temp * 10.0f));
@@ -240,6 +248,36 @@ void logFusionEvent(const char *result, uint32_t eventSequence,
         f.close();
     }
     xSemaphoreGive(storageMutex);
+
+    // Structured fusion outcome for the USB-connected main computer. This does
+    // NOT change the alarm decision or make the computer necessary for Whisper.
+    // String fields in this pilot event are either firmware literals or signed
+    // peer identities validated by the radio parser.
+    String peerId = peerEvent ? String(peerEvent->source) : String("");
+    peerId.replace("\\", "\\\\");
+    peerId.replace("\"", "\\\"");
+    Serial.printf(
+        "OGFUSION:{\"device_id\":\"%s\",\"boot\":%lu,"
+        "\"sequence\":%lu,\"origin_boot\":%lu,"
+        "\"uptime_ms\":%lu,\"type\":\"FUSION\","
+        "\"result\":\"%s\",\"peer\":\"%s\","
+        "\"level\":%u,\"score\":%.2f,\"max_temp\":%.2f,"
+        "\"cluster\":%u,\"peer_level\":%u,\"peer_score\":%.2f,"
+        "\"peer_max_temp\":%.2f,\"rssi\":%.1f,\"snr\":%.1f}\n",
+        myTowerID.c_str(), static_cast<unsigned long>(myBootCounter),
+        static_cast<unsigned long>(eventSequence),
+        static_cast<unsigned long>(peerEvent ? peerEvent->origin_boot : myBootCounter),
+        static_cast<unsigned long>(millis()), result, peerId.c_str(),
+        static_cast<unsigned>(localPacket ? localPacket->fire_level : 0),
+        localPacket ? localPacket->local_fire_score : 0.0f,
+        localPacket ? localPacket->max_temp : 0.0f,
+        static_cast<unsigned>(localPacket ? localPacket->largest_hotspot_cluster : 0),
+        static_cast<unsigned>(peerEvent ? peerEvent->fire_level : 0),
+        peerEvent ? peerEvent->fire_score : 0.0f,
+        peerEvent ? peerEvent->max_temp : 0.0f,
+        peerEvent ? peerEvent->rssi : 0.0f,
+        peerEvent ? peerEvent->snr : 0.0f
+    );
 }
 
 String statusJson() {

@@ -13,7 +13,7 @@ enum FireLevel : uint8_t {
     FIRE_WATCH = 1,
     FIRE_WARNING = 2,
     FIRE_CRITICAL = 3,
-    FIRE_CONFIRMED = 4
+    FIRE_NETWORK_CORROBORATED = 4  // peer evidence, NEVER verified ground-truth fire
 };
 
 enum HealthLevel : uint8_t {
@@ -75,6 +75,7 @@ struct LoraTxMessage {
     char type[12];
     char destination[24];
     uint32_t sequence;
+    uint32_t origin_boot;
     bool require_ack;
 };
 
@@ -88,6 +89,7 @@ struct PeerEvent {
     uint8_t type;
     char source[24];
     uint32_t sequence;
+    uint32_t origin_boot;
     uint8_t fire_level;
     uint8_t health_level;
     float fire_score;
@@ -99,12 +101,33 @@ struct PeerEvent {
     float snr;
 };
 
+// OGC2: pilot command messages are HMAC authenticated; no arbitrary shell/OTA over LoRa.
+struct ControlRequest {
+    char source[24];
+    uint32_t source_boot;
+    uint32_t sequence;
+    uint32_t command_id; // local PC job ID; 0 for a remote radio request
+    char opcode[16];
+    int16_t argument;
+};
+struct PcControlCommand {
+    uint32_t command_id;
+    char target[24];
+    char opcode[16];
+    int16_t argument;
+};
+extern QueueHandle_t remoteControlQueue;
+extern QueueHandle_t pcControlQueue;
 extern QueueHandle_t loraTxQueue;
 extern QueueHandle_t peerEventQueue;
 extern EventGroupHandle_t systemEvents;
+extern volatile uint8_t gCurrentFireLevel;
+extern volatile uint32_t gLastFireWatchMs;
+extern volatile int gBatteryPct;
 
 extern String myTowerID;
 extern String myBootID;
+extern uint32_t myBootCounter;
 
 constexpr EventBits_t EVENT_SENSOR_BUSY = BIT0;
 constexpr EventBits_t EVENT_LORA_BUSY = BIT1;

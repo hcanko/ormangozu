@@ -1,0 +1,21 @@
+# Generated pilot data / local credentials
+.env
+**/.env
+**/*.sqlite3
+**/*.db
+**/__pycache__/
+**/*.pyc
+pilot_usb.jsonl
+
+# OTA private signing material and firmware generated files
+*.pem
+*.key
+*.bin
+*.signed.json
+*.pubhex
+**/.pio/
+**/node_modules/
+.pytest_cache/
+sensor_logs.csv
+**/test_pilot.db
+ota_transfer_audit.jsonl
